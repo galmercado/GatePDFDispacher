@@ -231,6 +231,13 @@ def manage_page(event_id: int, request: Request, user: User = Depends(require_ad
     return render(request, "manage.html", manage_ctx(db, user, event))
 
 
+@app.get("/events/{event_id}/attendees/import", include_in_schema=False)
+@app.get("/events/{event_id}/tickets/upload", include_in_schema=False)
+def upload_url_visited_directly(event_id: int, user: User = Depends(require_admin)):
+    """These URLs only accept form POSTs; a reload or bookmark lands on the manage page."""
+    return RedirectResponse(f"/events/{event_id}/manage", status_code=303)
+
+
 @app.post("/events/{event_id}/attendees/import", response_class=HTMLResponse)
 async def import_guest_list(
     event_id: int, request: Request, file: UploadFile = File(...),

@@ -428,3 +428,10 @@ def test_whatsapp_interval_has_one_second_floor(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_visiting_upload_urls_directly_redirects_to_manage(admin, doorman, event_id):
+    for path in ("attendees/import", "tickets/upload"):
+        r = admin.get(f"/events/{event_id}/{path}")
+        assert r.status_code == 303 and r.headers["location"] == f"/events/{event_id}/manage"
+        assert doorman.get(f"/events/{event_id}/{path}").status_code == 403
