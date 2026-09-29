@@ -2,7 +2,7 @@
 	encode gzip
 	# uploads (guest lists / ticket PDFs) can be large
 	request_body {
-		max_size 60MB
+		max_size 300MB
 	}
 	reverse_proxy app:8000
 }
