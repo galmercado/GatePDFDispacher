@@ -1,50 +1,53 @@
 """Reference lists for the event scheduling form. Edit freely - one name per line.
 
 The teams and arenas are compiled from general knowledge (not fetched live), so review
-them once. Anything missing can be typed via the "Other" option in the form.
+them once (names are in Hebrew). Anything missing can be typed via the "Other" option in the form.
 """
 
-HOME_TEAM = "Maccabi Tel Aviv"
+HOME_TEAM = "מכבי תל אביב"
+VERSUS = "נגד"
 
-# Israeli Basketball Premier League (Ligat Winner) opponents; recent and current clubs.
+# ליגת ווינר - קבוצות יריבות (הקבוצות הנוכחיות והאחרונות בליגה)
 OPPONENTS = [
-    "Hapoel Tel Aviv",
-    "Hapoel Jerusalem",
-    "Hapoel Holon",
-    "Hapoel Be'er Sheva",
-    "Hapoel Haifa",
-    "Hapoel Eilat",
-    "Hapoel Gilboa Galil",
-    "Hapoel Galil Elyon",
-    "Hapoel Afula",
-    "Bnei Herzliya",
-    "Ironi Ness Ziona",
-    "Ironi Kiryat Ata",
-    "Maccabi Rishon LeZion",
-    "Maccabi Ra'anana",
-    "Maccabi Haifa",
+    "הפועל תל אביב",
+    "הפועל ירושלים",
+    "הפועל חולון",
+    "הפועל באר שבע",
+    "הפועל חיפה",
+    "הפועל אילת",
+    "הפועל גלבוע גליל",
+    "הפועל גליל עליון",
+    "הפועל עפולה",
+    "בני הרצליה",
+    "עירוני נס ציונה",
+    "עירוני קריית אתא",
+    "מכבי ראשון לציון",
+    "מכבי רעננה",
+    "מכבי חיפה",
 ]
 
-DEFAULT_LOCATION = "Home (Menora Mivtachim Arena)"
+DEFAULT_LOCATION = "בית (היכל מנורה מבטחים)"
 
 ARENAS = [
     DEFAULT_LOCATION,
-    "Drive in Arena (Tel Aviv)",
-    "Yad Eliyahu Arena (Tel Aviv)",
-    "Pais Arena (Jerusalem)",
-    "Toto Arena (Holon)",
-    "Be'er Sheva Arena",
-    "Romema Arena (Haifa)",
-    "Begin Sport Hall (Eilat)",
-    "Herzliya Arena",
-    "Ness Ziona Arena",
-    "Kiryat Ata Arena",
-    "Rishon LeZion Arena",
-    "Ra'anana Sports Hall",
-    "Galil Elyon Arena (Kiryat Shmona)",
-    "Gilboa Galil Arena",
-    "Enerbox Arena (Hadera)",
-    "Netanya Arena",
+    "דרייב אין ארנה (תל אביב)",
+    "היכל יד אליהו (תל אביב)",
+    "פיס ארנה (ירושלים)",
+    "טוטו ארנה (חולון)",
+    "אולם הספורט באר שבע",
+    "אולם רוממה (חיפה)",
+    "היכל הספורט אילת",
+    "היכל הספורט הרצליה",
+    "היכל נס ציונה",
+    "היכל הספורט קריית אתא",
+    "היכל הספורט ראשון לציון",
+    "אולם הספורט רעננה",
+    "היכל הספורט קריית שמונה",
+    "היכל גלבוע גליל",
+    "אנרבוקס ארנה (חדרה)",
+    "נתניה ארנה",
 ]
 
 OTHER = "__other__"
+OTHER_LABEL_OPPONENT = "אחר (הקלידו שם)…"
+OTHER_LABEL_LOCATION = "אחר (הקלידו אולם)…"

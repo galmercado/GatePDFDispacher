@@ -202,7 +202,9 @@ def events_ctx(db: Session, user: User, **extra) -> dict:
     events = db.query(Event).order_by(Event.event_date.desc()).all()
     return {"user": user, "events": events, "stats": {e.id: compute_stats(db, e.id) for e in events},
             "error": None, "opponents": data.OPPONENTS, "arenas": data.ARENAS,
-            "default_location": data.DEFAULT_LOCATION, "OTHER": data.OTHER, **extra}
+            "default_location": data.DEFAULT_LOCATION, "OTHER": data.OTHER,
+            "home_team": data.HOME_TEAM, "versus": data.VERSUS,
+            "other_opponent": data.OTHER_LABEL_OPPONENT, "other_location": data.OTHER_LABEL_LOCATION, **extra}
 
 
 @app.get("/events", response_class=HTMLResponse)
@@ -241,7 +243,7 @@ def create_event(
         msg = str(exc) if "Type the" in str(exc) or "Choose" in str(exc) else "Pick a valid date and time."
         return render(request, "events.html",
                       events_ctx(db, user, error=msg, open_modal=True), status=422)
-    db.add(Event(name=f"{data.HOME_TEAM} vs. {rival}", location=place, event_date=when))
+    db.add(Event(name=f"{data.HOME_TEAM} {data.VERSUS} {rival}", location=place, event_date=when))
     db.commit()
     return RedirectResponse("/events", status_code=303)
 

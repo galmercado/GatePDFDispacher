@@ -2,7 +2,7 @@
 {% block title %}Manage {{ event.name }}{% endblock %}
 {% block content %}
 <a href="/events" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-400 hover:text-white"><i class="ph ph-arrow-left"></i> Events</a>
-<h1 class="text-2xl font-bold text-white">{{ event.name }}</h1>
+<h1 dir="auto" class="text-2xl font-bold text-white">{{ event.name }}</h1>
 <p class="mb-5 text-sm text-slate-400">{{ stats.guests }} guest(s) · {{ stats.total }} ticket(s) · {{ ticket_files }} PDF ticket(s) attached</p>
 
 {% for m in messages %}

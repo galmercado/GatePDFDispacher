@@ -199,7 +199,7 @@ def test_anonymous_is_redirected_or_rejected(client, event_id):
 
 def test_doorman_cannot_use_admin_endpoints(admin, doorman, event_id):
     assert doorman.get("/events").status_code == 200
-    r = doorman.post("/events", data={"opponent": "Hapoel Holon", "event_date": "2030-01-01T10:00"})
+    r = doorman.post("/events", data={"opponent": "הפועל חולון", "event_date": "2030-01-01T10:00"})
     assert r.status_code == 403
     assert doorman.get(f"/events/{event_id}/manage").status_code == 403
     r = doorman.post(f"/events/{event_id}/attendees/import",
@@ -209,21 +209,21 @@ def test_doorman_cannot_use_admin_endpoints(admin, doorman, event_id):
     assert r.status_code == 403
     with SessionLocal() as db:
         assert db.query(Attendee).filter_by(event_id=event_id).count() == 0
-        assert db.query(Event).filter_by(name="Maccabi Tel Aviv vs. Hapoel Holon").count() == 0
+        assert db.query(Event).filter_by(name="מכבי תל אביב נגד הפועל חולון").count() == 0
 
 
 def test_admin_can_create_event(admin):
-    r = admin.post("/events", data={"opponent": "Hapoel Jerusalem", "event_date": "2031-06-01T18:30"})
+    r = admin.post("/events", data={"opponent": "הפועל ירושלים", "event_date": "2031-06-01T18:30"})
     assert r.status_code == 303
     page = admin.get("/events").text
-    assert "Maccabi Tel Aviv vs. Hapoel Jerusalem" in page and "Home (Menora Mivtachim Arena)" in page
-    r = admin.post("/events", data={"opponent": "__other__", "opponent_other": "Zalgiris",
+    assert "מכבי תל אביב נגד הפועל ירושלים" in page and "בית (היכל מנורה מבטחים)" in page
+    r = admin.post("/events", data={"opponent": "__other__", "opponent_other": "צלגיריס",
                                     "location": "__other__", "location_other": "Kaunas Hall",
                                     "event_date": "2031-07-01T20:00"})
-    assert r.status_code == 303 and "Maccabi Tel Aviv vs. Zalgiris" in admin.get("/events").text
+    assert r.status_code == 303 and "מכבי תל אביב נגד צלגיריס" in admin.get("/events").text
     assert admin.post("/events", data={"opponent": "__other__", "opponent_other": "  ",
                                        "event_date": "2031-07-01T20:00"}).status_code == 422
-    assert admin.post("/events", data={"opponent": "Hapoel Holon", "event_date": "bad"}).status_code == 422
+    assert admin.post("/events", data={"opponent": "הפועל חולון", "event_date": "bad"}).status_code == 422
 
 
 def test_doorman_cockpit_search_toggle_stats_qr(admin, doorman, event_id):
