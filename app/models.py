@@ -91,3 +91,16 @@ class Ticket(Base):
 
     event: Mapped[Event] = relationship(back_populates="tickets")
     attendee: Mapped[Attendee] = relationship(back_populates="tickets")
+
+
+class SpareTicket(Base):
+    """An uploaded ticket page not yet assigned to anyone. Assigned automatically (lowest page
+    first) to guests who are missing tickets; a new claim token is issued on assignment."""
+
+    __tablename__ = "spare_tickets"
+    __table_args__ = (UniqueConstraint("event_id", "page_number"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    page_number: Mapped[int] = mapped_column(Integer)
+    file_path: Mapped[str] = mapped_column(String(512))

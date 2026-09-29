@@ -25,8 +25,8 @@ from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
 from .models import Attendee, Event, Role, Ticket, User, utcnow
 from .services import (
-    AttendeeIn, ImportValidationError, PdfProcessingError, WhatsAppError, import_attendees,
-    map_pdf_to_attendees, normalize_phone, parse_guest_list, send_whatsapp_pdf,
+    AttendeeIn, ImportValidationError, PdfProcessingError, WhatsAppError, add_ticket_pdf, import_attendees,
+    normalize_phone, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, ticket_status,
 )
 
 log = logging.getLogger("gate")
@@ -321,10 +321,15 @@ def create_event(
 
 def manage_ctx(db: Session, user: User, event: Event, **extra) -> dict:
     tickets = db.query(func.count(Ticket.id)).filter(Ticket.event_id == event.id).scalar()
+    status = ticket_status(db, event.id)
+    warnings = list(extra.pop("warnings", []))
+    if status["missing"]:
+        warnings.append(f"{status['missing']} ticket(s) for {status['guests_missing']} guest(s) still have no PDF. "
+                        "Upload more ticket pages below - they are assigned automatically.")
     attendees = (db.query(Attendee).options(selectinload(Attendee.tickets))
                  .filter(Attendee.event_id == event.id).order_by(func.lower(Attendee.name), Attendee.id).all())
     return {"user": user, "event": event, "stats": compute_stats(db, event.id),
-            "ticket_files": tickets, "attendees": attendees, "groups": group_by_category(attendees),
+            "ticket_files": tickets, "spare_pages": status["spare"], "warnings": warnings, "attendees": attendees, "groups": group_by_category(attendees),
             "categories": data.CATEGORIES, "messages": [], "errors": [], **extra}
 
 
@@ -357,29 +362,31 @@ async def import_guest_list(
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=exc.errors[:50]), status=422)
     count, skipped = import_attendees(db, event.id, items)
-    return render(request, "manage.html",
-                  manage_ctx(db, user, event, messages=[f"Imported {count} guest(s)."
-                                    + (f" Skipped {skipped} already on the list." if skipped else "")]))
+    result = rebalance_tickets(db, event.id)
+    msgs = [f"Imported {count} guest(s)." + (f" Skipped {skipped} already on the list." if skipped else "")]
+    if result["assigned"]:
+        msgs.append(f"Assigned {result['assigned']} spare ticket page(s) automatically.")
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs))
 
 
 @app.post("/events/{event_id}/tickets/upload", response_class=HTMLResponse)
 async def upload_ticket_pdf(
-    event_id: int, request: Request, file: UploadFile = File(...),
+    event_id: int, request: Request, file: UploadFile = File(...), replace: str = Form(""),
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     event = get_event_or_404(db, event_id)
     content = await file.read(config.MAX_PDF_BYTES + 1)
     try:
         if len(content) > config.MAX_PDF_BYTES:
-            raise PdfProcessingError("File is too large (50 MB max)")
-        count, spare = map_pdf_to_attendees(db, event.id, content)
+            raise PdfProcessingError(f"File is too large ({config.MAX_PDF_BYTES // (1024 * 1024)} MB max)")
+        result = add_ticket_pdf(db, event.id, content, replace=replace == "on")
     except PdfProcessingError as exc:
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=[str(exc)]), status=422)
-    return render(request, "manage.html",
-                  manage_ctx(db, user, event, messages=[
-                      f"Split and attached {count} ticket(s)."
-                      + (f" {spare} extra page(s) were stored but not assigned." if spare else "")]))
+    msgs = [f"Added {result['pages']} page(s); assigned {result['assigned']} ticket(s) to guests."]
+    if result["spare"]:
+        msgs.append(f"{result['spare']} spare page(s) are waiting for new guests.")
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs))
 
 
 # --------------------------------------------------------------------------- manual attendees
@@ -400,6 +407,17 @@ def is_duplicate(db: Session, event_id: int, item: AttendeeIn, exclude_id: int |
     return q.first() is not None
 
 
+def guest_outcome(db: Session, attendee: Attendee, verb: str) -> dict:
+    """Messages/warnings after a guest was added or changed: were their ticket PDFs assigned?"""
+    db.refresh(attendee)
+    have, need = len(attendee.tickets), attendee.ticket_count
+    if have >= need:
+        return {"messages": [f"{verb} {attendee.name} - {need} ticket PDF(s) assigned automatically."]}
+    return {"messages": [f"{verb} {attendee.name}."],
+            "warnings": [f"No spare ticket PDF left for {attendee.name}: has {have} of {need}. "
+                         "Upload more ticket pages below and they will be assigned automatically."]}
+
+
 @app.post("/events/{event_id}/attendees", response_class=HTMLResponse)
 def add_attendee(
     event_id: int, request: Request,
@@ -415,12 +433,11 @@ def add_attendee(
         errors = [f"{item.name} ({item.phone}) is already on the list."]
     if errors:
         return render(request, "manage.html", manage_ctx(db, user, event, errors=errors), status=422)
-    db.add(Attendee(event_id=event.id, **item.model_dump()))
+    attendee = Attendee(event_id=event.id, **item.model_dump())
+    db.add(attendee)
     db.commit()
-    msgs = [f"Added {item.name}."]
-    if manage_ctx(db, user, event)["ticket_files"]:
-        msgs.append("Re-upload the ticket PDF to attach a ticket to this guest.")
-    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs))
+    rebalance_tickets(db, event.id)
+    return render(request, "manage.html", manage_ctx(db, user, event, **guest_outcome(db, attendee, "Added")))
 
 
 @app.post("/attendees/{attendee_id}/edit", response_class=HTMLResponse)
@@ -443,11 +460,8 @@ def edit_attendee(
     for key, value in item.model_dump().items():
         setattr(attendee, key, value)
     db.commit()
-    msgs = [f"Updated {attendee.name}."]
-    if attendee.tickets and len(attendee.tickets) != attendee.ticket_count:
-        msgs.append(f"{attendee.name} now has {attendee.ticket_count} ticket(s) but {len(attendee.tickets)} PDF(s) "
-                    "attached - re-upload the ticket PDF to re-map.")
-    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs))
+    rebalance_tickets(db, event.id)
+    return render(request, "manage.html", manage_ctx(db, user, event, **guest_outcome(db, attendee, "Updated")))
 
 
 @app.post("/attendees/{attendee_id}/delete", response_class=HTMLResponse)
@@ -456,9 +470,14 @@ def delete_attendee(attendee_id: int, request: Request, user: User = Depends(req
     attendee = get_attendee_or_404(db, attendee_id)
     event = get_event_or_404(db, attendee.event_id)
     name = attendee.name
+    release_tickets(db, attendee)      # their ticket pages go back to the pool for other guests
     db.delete(attendee)
     db.commit()
-    return render(request, "manage.html", manage_ctx(db, user, event, messages=[f"Removed {name}."]))
+    result = rebalance_tickets(db, event.id)
+    msgs = [f"Removed {name}."]
+    if result["assigned"]:
+        msgs.append(f"Their freed ticket page(s) were reassigned to {result['assigned']} other ticket(s).")
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs))
 
 
 # --------------------------------------------------------------------------- doorman

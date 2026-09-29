@@ -150,7 +150,7 @@ def test_pdf_split_maps_pages_sequentially(admin, event_id):
                files={"file": ("g.json", json.dumps(GUESTS).encode())})
     r = admin.post(f"/events/{event_id}/tickets/upload",
                    files={"file": ("all.pdf", make_pdf(5), "application/pdf")})
-    assert r.status_code == 200 and "attached 5 ticket(s)" in r.text
+    assert r.status_code == 200 and "assigned 5 ticket(s)" in r.text
 
     out = config.STORAGE_DIR / "tickets" / str(event_id)
     files = sorted(out.glob("*.pdf"))
@@ -169,20 +169,81 @@ def test_pdf_split_maps_pages_sequentially(admin, event_id):
         assert len(set(tokens)) == 5 and all(len(t) == 32 for t in tokens)
 
 
-def test_pdf_page_count_mismatch_and_garbage_rejected(admin, event_id):
+def test_pdf_shortfall_is_allowed_and_topped_up_later(admin, event_id):
     admin.post(f"/events/{event_id}/attendees/import",
                files={"file": ("g.json", json.dumps(GUESTS).encode())})
     r = admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(4))})
-    assert r.status_code == 422 and "needs 5" in r.text and "3 guests" in r.text and "per ticket" in r.text
+    assert r.status_code == 200 and "assigned 4 ticket(s)" in r.text
+    assert "1 ticket(s) for 1 guest(s) still have no PDF" in r.text          # prompt about the shortfall
+    r = admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("b.pdf", make_pdf(2))})
+    assert "assigned 1 ticket(s)" in r.text and "1 spare page(s)" in r.text and "still have no PDF" not in r.text
+    with SessionLocal() as db:
+        pages = sorted(t.page_number for t in db.query(Ticket).filter_by(event_id=event_id))
+        assert pages == [1, 2, 3, 4, 5]                                      # later pages continue the numbering
     r = admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", b"%PDF-garbage")})
     assert r.status_code == 422
+
+
+def test_pdf_upload_before_guests_waits_in_pool(admin, event_id):
+    r = admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(3))})
+    assert r.status_code == 200 and "3 spare page(s)" in r.text
+    r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(GUESTS).encode())})
+    assert "Assigned 3 spare ticket page(s)" in r.text and "still have no PDF" in r.text
+
+
+def test_new_guest_gets_spare_ticket_automatically(admin, event_id):
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(GUESTS).encode())})
+    admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(7))})   # 2 spare
+    form = {"name": "Late Guest", "phone": "0501111111", "category": "פתוח", "adult_count": "1", "youth_count": "1"}
+    r = admin.post(f"/events/{event_id}/attendees", data=form)
+    assert "2 ticket PDF(s) assigned automatically" in r.text and "No spare" not in r.text
+    r = admin.post(f"/events/{event_id}/attendees", data={**form, "name": "Later Guest", "phone": "0502222222"})
+    assert "No spare ticket PDF left for Later Guest: has 0 of 2" in r.text          # prompt: pool is empty
+    r = admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("more.pdf", make_pdf(2))})
+    assert "assigned 2 ticket(s)" in r.text and "still have no PDF" not in r.text
     with SessionLocal() as db:
-        assert db.query(Ticket).filter_by(event_id=event_id).count() == 0
+        for a in db.query(Attendee).filter_by(event_id=event_id):
+            assert len(a.tickets) == a.ticket_count, a.name
 
 
-def test_pdf_upload_requires_guest_list(admin, event_id):
-    r = admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(1))})
-    assert r.status_code == 422 and "guest list" in r.text
+def test_removed_or_reduced_guest_frees_pages_for_others(admin, event_id):
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(GUESTS).encode())})
+    admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(5))})
+    admin.post(f"/events/{event_id}/attendees", data={"name": "Waiting", "phone": "0503333333",
+               "category": "פתוח", "adult_count": "2", "youth_count": "0"})
+    with SessionLocal() as db:
+        ids = {a.name: a.id for a in db.query(Attendee).filter_by(event_id=event_id)}
+        old_token = db.get(Attendee, ids["Ada Lovelace"]).tickets[0].claim_token
+    r = admin.post(f"/attendees/{ids['Ada Lovelace']}/delete")                     # frees 2 pages
+    assert "reassigned to 2 other ticket(s)" in r.text
+    with SessionLocal() as db:
+        waiting = db.get(Attendee, ids["Waiting"])
+        assert len(waiting.tickets) == 2
+        assert old_token not in [t.claim_token for t in waiting.tickets]             # fresh link, old one is dead
+    assert TestClient(app).get(f"/tickets/claim/{old_token}").status_code == 404
+    # lowering a count returns the surplus page to the pool
+    admin.post(f"/attendees/{ids['Alan Turing']}/edit", data={"name": "Alan Turing", "phone": "15550100003",
+               "category": "פתוח", "adult_count": "1", "youth_count": "0"})
+    with SessionLocal() as db:
+        assert len(db.get(Attendee, ids["Alan Turing"]).tickets) == 1
+        assert ticket_status_for(db, event_id)["spare"] == 1
+
+
+def ticket_status_for(db, event_id):
+    return services.ticket_status(db, event_id)
+
+
+def test_replace_upload_starts_over(admin, event_id):
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(GUESTS).encode())})
+    admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(5))})
+    with SessionLocal() as db:
+        old = {t.claim_token for t in db.query(Ticket).filter_by(event_id=event_id)}
+    r = admin.post(f"/events/{event_id}/tickets/upload", data={"replace": "on"},
+                   files={"file": ("a.pdf", make_pdf(6))})
+    assert "assigned 5 ticket(s)" in r.text and "1 spare page(s)" in r.text
+    with SessionLocal() as db:
+        assert not old & {t.claim_token for t in db.query(Ticket).filter_by(event_id=event_id)}
+        assert len(list((config.STORAGE_DIR / "tickets" / str(event_id)).glob("*.pdf"))) == 6
 
 
 # ----------------------------------------------------------------- RBAC
@@ -350,7 +411,7 @@ def test_extra_pdf_pages_are_allowed(admin, event_id):
     admin.post(f"/events/{event_id}/attendees/import",
                files={"file": ("g.json", json.dumps(GUESTS).encode())})
     r = admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(8))})
-    assert r.status_code == 200 and "attached 5 ticket(s)" in r.text and "3 extra page(s)" in r.text
+    assert r.status_code == 200 and "assigned 5 ticket(s)" in r.text and "3 spare page(s)" in r.text
     assert len(list((config.STORAGE_DIR / "tickets" / str(event_id)).glob("*.pdf"))) == 8
     with SessionLocal() as db:
         assert db.query(Ticket).filter_by(event_id=event_id).count() == 5

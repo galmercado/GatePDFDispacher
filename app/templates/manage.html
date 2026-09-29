@@ -9,6 +9,10 @@
 <div class="mb-4 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200" role="status">
   <i class="ph-fill ph-check-circle"></i> {{ m }}</div>
 {% endfor %}
+{% for w in warnings %}
+<div class="mb-4 flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200" role="alert">
+  <i class="ph-fill ph-warning mt-0.5"></i><span>{{ w }}</span></div>
+{% endfor %}
 {% if errors %}
 <div class="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">
   <p class="mb-1 font-medium"><i class="ph-fill ph-warning-circle"></i> Nothing was saved:</p>
@@ -28,13 +32,19 @@
 </section>
 
 <section class="rounded-2xl border border-slate-800 bg-slate-900 p-5">
-  <h2 class="mb-1 flex items-center gap-2 font-semibold text-white"><i class="ph ph-file-pdf text-brand-400"></i> 2. Upload merged ticket PDF</h2>
-  <p class="mb-3 text-sm text-slate-400">One page per ticket, in guest-list order. Page count must equal the total ticket count
-    ({{ stats.total }}). Re-uploading replaces existing tickets.</p>
-  <form method="post" action="/events/{{ event.id }}/tickets/upload" enctype="multipart/form-data" class="flex flex-col gap-3 sm:flex-row">
-    <input type="file" name="file" accept="application/pdf,.pdf" required
-           class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-3 file:text-slate-200">
-    <button class="flex items-center justify-center gap-2 rounded-xl bg-brand-500 px-5 py-3 text-sm font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-scissors"></i> Split &amp; attach</button>
+  <h2 class="mb-1 flex items-center gap-2 font-semibold text-white"><i class="ph ph-file-pdf text-brand-400"></i> 2. Upload ticket PDF</h2>
+  <p class="mb-3 text-sm text-slate-400">One page per ticket ({{ stats.total }} needed for the current list). Pages are assigned automatically to guests
+    who don't have a ticket yet. You can upload more PDFs later - for late guests or top-ups - and they are added to the pool.
+    {% if spare_pages %}<span class="text-slate-300">{{ spare_pages }} spare page(s) waiting.</span>{% endif %}</p>
+  <form method="post" action="/events/{{ event.id }}/tickets/upload" enctype="multipart/form-data" class="flex flex-col gap-3">
+    <div class="flex flex-col gap-3 sm:flex-row">
+      <input type="file" name="file" accept="application/pdf,.pdf" required
+             class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-3 file:text-slate-200">
+      <button class="flex items-center justify-center gap-2 rounded-xl bg-brand-500 px-5 py-3 text-sm font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-scissors"></i> Add &amp; assign</button>
+    </div>
+    <label class="flex items-center gap-2 text-sm text-slate-400"><input type="checkbox" name="replace" class="h-4 w-4 rounded"
+      onclick="if(this.checked&&!confirm('Replace ALL existing tickets and spare pages with this PDF? Links already sent will stop working.')) this.checked=false">
+      Start over: replace all existing tickets</label>
   </form>
 </section>
 

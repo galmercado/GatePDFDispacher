@@ -15,10 +15,11 @@ import pandas as pd
 from pydantic import BaseModel, ValidationError, field_validator, model_validator
 from pypdf import PdfReader, PdfWriter
 from pypdf.errors import PyPdfError
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, selectinload
 
 from . import config, data
-from .models import Attendee, Ticket
+from .models import Attendee, SpareTicket, Ticket
 
 log = logging.getLogger("gate.whatsapp")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -263,8 +264,9 @@ def event_ticket_dir(event_id: int) -> Path:
     return config.STORAGE_DIR / "tickets" / str(event_id)
 
 
-def split_pdf(content: bytes, event_id: int) -> list[Path]:
-    """Split a multi-page PDF into single-page files in storage/tickets/{event_id}/."""
+def split_pdf(content: bytes, event_id: int, start: int = 1) -> list[Path]:
+    """Split a multi-page PDF into single-page files (ticket_NNNN.pdf, numbered from `start`)
+    in storage/tickets/{event_id}/. Existing files are never touched."""
     try:
         reader = PdfReader(io.BytesIO(content))
         if reader.is_encrypted:
@@ -278,12 +280,10 @@ def split_pdf(content: bytes, event_id: int) -> list[Path]:
         raise PdfProcessingError("The PDF has no pages")
 
     out_dir = event_ticket_dir(event_id)
-    if out_dir.exists():
-        shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     paths: list[Path] = []
-    for index, page in enumerate(reader.pages, start=1):
+    for index, page in enumerate(reader.pages, start=start):
         writer = PdfWriter()
         writer.add_page(page)
         path = out_dir / f"ticket_{index:04d}.pdf"
@@ -293,47 +293,101 @@ def split_pdf(content: bytes, event_id: int) -> list[Path]:
     return paths
 
 
-def map_pdf_to_attendees(db: Session, event_id: int, content: bytes) -> tuple[int, int]:
-    """Split `content` and attach pages sequentially to attendees (by id) per ticket_count.
+def ticket_status(db: Session, event_id: int) -> dict:
+    """{'missing': tickets guests still lack, 'spare': unassigned pages, 'guests_missing': int}"""
+    attendees = db.query(Attendee).options(selectinload(Attendee.tickets)).filter(
+        Attendee.event_id == event_id).all()
+    gaps = [a.ticket_count - len(a.tickets) for a in attendees]
+    spare = db.query(SpareTicket).filter(SpareTicket.event_id == event_id).count()
+    return {"missing": sum(g for g in gaps if g > 0), "guests_missing": sum(1 for g in gaps if g > 0),
+            "spare": spare}
 
-    The PDF may contain more pages than needed (spare tickets stay unassigned on disk),
-    but never fewer, so no guest is left without a ticket.
-    Returns (tickets_attached, spare_pages).
+
+def rebalance_tickets(db: Session, event_id: int) -> dict:
+    """Keep every guest's tickets in line with their ticket_count using the event's spare pages.
+
+    1. Guests holding more tickets than they should (count lowered / guest removed elsewhere)
+       return the surplus (highest pages first) to the spare pool.
+    2. Guests missing tickets receive spare pages, lowest page first, in guest order.
+    Returns {'assigned': n, 'missing': n, 'spare': n}.
     """
-    attendees = (
-        db.query(Attendee).filter(Attendee.event_id == event_id).order_by(Attendee.id).all()
-    )
-    if not attendees:
-        raise PdfProcessingError("Import the guest list before uploading the ticket PDF")
-    needed = sum(a.ticket_count for a in attendees)
+    db.expire_all()  # collections loaded earlier in the request may be stale
+    attendees = (db.query(Attendee).options(selectinload(Attendee.tickets))
+                 .filter(Attendee.event_id == event_id).order_by(Attendee.id).all())
+    for a in attendees:
+        surplus = len(a.tickets) - a.ticket_count
+        if surplus > 0:
+            for t in sorted(a.tickets, key=lambda t: t.page_number, reverse=True)[:surplus]:
+                db.add(SpareTicket(event_id=event_id, page_number=t.page_number, file_path=t.file_path))
+                db.delete(t)
+    db.flush()
+    db.expire_all()
 
+    spares = (db.query(SpareTicket).filter(SpareTicket.event_id == event_id)
+              .order_by(SpareTicket.page_number).all())
+    queue = iter(spares)
+    assigned = missing = 0
+    for a in attendees:
+        need = a.ticket_count - min(len(a.tickets), a.ticket_count)
+        for _ in range(need):
+            spare = next(queue, None)
+            if spare is None:
+                missing += 1
+                continue
+            db.add(Ticket(event_id=event_id, attendee_id=a.id, page_number=spare.page_number,
+                          file_path=spare.file_path))
+            db.delete(spare)
+            assigned += 1
+    db.commit()
+    db.expire_all()
+    left = db.query(SpareTicket).filter(SpareTicket.event_id == event_id).count()
+    return {"assigned": assigned, "missing": missing, "spare": left}
+
+
+def release_tickets(db: Session, attendee: Attendee) -> None:
+    """Return an attendee's tickets to the spare pool (call before deleting them)."""
+    for t in list(attendee.tickets):
+        db.add(SpareTicket(event_id=attendee.event_id, page_number=t.page_number, file_path=t.file_path))
+        db.delete(t)
+    db.flush()
+    db.expire(attendee, ["tickets"])  # already deleted; don't let a later cascade delete them twice
+
+
+def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = False) -> dict:
+    """Add the pages of a (merged) PDF to the event's ticket pool and hand them out.
+
+    Additive by default: later uploads top up guests who are still missing tickets.
+    replace=True discards all existing tickets and spare pages first.
+    Returns {'pages': added, 'assigned', 'missing', 'spare'}.
+    """
     try:
-        page_count = len(PdfReader(io.BytesIO(content)).pages)
+        reader = PdfReader(io.BytesIO(content))
+        if reader.is_encrypted:
+            raise PdfProcessingError("Encrypted PDFs are not supported")
+        if len(reader.pages) == 0:
+            raise PdfProcessingError("The PDF has no pages")
+    except PdfProcessingError:
+        raise
     except Exception as exc:
         raise PdfProcessingError(f"Not a valid PDF: {exc}")
-    if page_count < needed:
-        raise PdfProcessingError(
-            f"The PDF has only {page_count} page(s) but the guest list needs {needed} ticket(s) "
-            f"({len(attendees)} guests: {sum(a.adult_count for a in attendees)} adult + "
-            f"{sum(a.youth_count for a in attendees)} youth). One page is needed per ticket, not per guest"
-        )
 
-    paths = split_pdf(content, event_id)
-    db.query(Ticket).filter(Ticket.event_id == event_id).delete()
-    page = 0
-    for attendee in attendees:
-        for _ in range(attendee.ticket_count):
-            db.add(
-                Ticket(
-                    event_id=event_id,
-                    attendee_id=attendee.id,
-                    page_number=page + 1,
-                    file_path=str(paths[page]),
-                )
-            )
-            page += 1
+    if replace:
+        db.query(Ticket).filter(Ticket.event_id == event_id).delete()
+        db.query(SpareTicket).filter(SpareTicket.event_id == event_id).delete()
+        db.commit()
+        out_dir = event_ticket_dir(event_id)
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+    last = max(
+        db.query(func.coalesce(func.max(Ticket.page_number), 0)).filter(Ticket.event_id == event_id).scalar(),
+        db.query(func.coalesce(func.max(SpareTicket.page_number), 0)).filter(
+            SpareTicket.event_id == event_id).scalar(),
+    )
+    paths = split_pdf(content, event_id, start=last + 1)
+    for offset, path in enumerate(paths, start=1):
+        db.add(SpareTicket(event_id=event_id, page_number=last + offset, file_path=str(path)))
     db.commit()
-    return page, len(paths) - page
+    return {"pages": len(paths), **rebalance_tickets(db, event_id)}
 
 
 # --------------------------------------------------------------------------- WhatsApp

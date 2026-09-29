@@ -8,7 +8,9 @@ Runs on Docker Compose, locally or on an Oracle Cloud Always-Free ARM VM.
 - **Events** (admin): opponent picker (`מכבי תל אביב נגד …`), arena picker (default *בית (היכל מנורה מבטחים)*), calendar date/time.
 - **Guests**: bulk import (`.xlsx` / `.json`) or add/edit/remove manually. Each guest has a **category**
   (חבר ארגון · מצטרף · פלוס · פתוח) and any mix of **מבוגר (adult)** and **נוער (youth)** tickets.
-- **Tickets**: upload one merged PDF; it is split per page and attached to guests in order (extra pages are allowed).
+- **Tickets**: upload a merged PDF; it is split per page and handed out automatically to guests who lack tickets. Extra pages wait in a
+  spare pool; new or edited guests get spare pages automatically, and if none are left you get a warning - upload more pages later and
+  they are assigned. Removing a guest or lowering their count returns pages to the pool (with a fresh link).
 - **Door cockpit** (admin + doorman): search, guests grouped by category with live counters, admitted total for all types
   at the top. WhatsApp and QR buttons both admit the guest; a small side button toggles admission only.
 - **Users**: admins manage users; sign in with password and/or Google.
@@ -176,6 +178,6 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/p
 - Doormen can view the event list and use the cockpit; admins create events, manage guests/tickets and users.
 - QR codes link straight to the ticket PDF (`/tickets/claim/{token}/ticket.pdf`); the token is an unguessable 32-hex UUID4.
   `/tickets/claim/{token}` is a small mobile page with a Download button.
-- The PDF may have more pages than needed (extras are stored unassigned) but not fewer than the total ticket count.
+- Ticket PDFs are additive: each upload adds pages to the pool; tick *Start over* to replace everything.
 - Team and arena lists live in `app/data.py`.
 - One uvicorn worker (SQLite).
