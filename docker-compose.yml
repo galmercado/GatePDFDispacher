@@ -20,7 +20,7 @@ services:
       - evolution-api
 
   evolution-api:
-    image: atendai/evolution-api:v2.2.3
+    image: evoapicloud/evolution-api:v2.3.7   # maintained image (atendai/* is stale); multi-arch incl. ARM64
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"   # admin/QR-pairing access from the host only

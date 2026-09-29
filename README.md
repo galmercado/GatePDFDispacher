@@ -16,17 +16,32 @@ App: <http://localhost:8000> — default login `admin@event.local` / `admin1234`
 
 ```bash
 set -a; . ./.env; set +a
-# 1. create the instance (QR enabled)
-curl -s -X POST http://localhost:8080/instance/create \
-  -H "apikey: $EVOLUTION_API_KEY" -H "Content-Type: application/json" \
+H="apikey: $EVOLUTION_API_KEY"
+# 1. create the instance
+curl -s -X POST http://localhost:8080/instance/create -H "$H" -H "Content-Type: application/json" \
   -d "{\"instanceName\":\"$EVOLUTION_INSTANCE\",\"integration\":\"WHATSAPP-BAILEYS\",\"qrcode\":true}"
-# 2. fetch a pairing code/QR (base64 PNG in .base64) and scan it in WhatsApp > Linked devices
-curl -s http://localhost:8080/instance/connect/$EVOLUTION_INSTANCE -H "apikey: $EVOLUTION_API_KEY"
+# 2a. QR: save it as a PNG and scan it (WhatsApp > Linked devices > Link a device)
+curl -s http://localhost:8080/instance/connect/$EVOLUTION_INSTANCE -H "$H" \
+  | python3 -c "import sys,json,base64;d=json.load(sys.stdin);open('qr.png','wb').write(base64.b64decode(d['base64'].split(',')[-1]))"
+# 2b. or link with a pairing code instead (no camera needed): enter it under
+#     Linked devices > Link with phone number instead
+curl -s "http://localhost:8080/instance/connect/$EVOLUTION_INSTANCE?number=15551234567" -H "$H"
 # 3. verify: state should be "open"
-curl -s http://localhost:8080/instance/connectionState/$EVOLUTION_INSTANCE -H "apikey: $EVOLUTION_API_KEY"
+curl -s http://localhost:8080/instance/connectionState/$EVOLUTION_INSTANCE -H "$H"
 ```
 
-Evolution's manager UI is also at <http://localhost:8080/manager> (host-only binding).
+The manager UI is at <http://localhost:8080/manager> (host-only binding).
+
+### Troubleshooting: no QR / `{"count":0}`
+
+1. Make sure you run the current image (`evoapicloud/evolution-api:v2.3.7`); the old `atendai/evolution-api:v2.2.3`
+   ships an outdated WhatsApp Web version and never produces a QR. After pulling the update:
+   `docker compose pull evolution-api && docker compose up -d`.
+2. Delete the stuck instance and recreate it:
+   `curl -X DELETE http://localhost:8080/instance/delete/$EVOLUTION_INSTANCE -H "$H"`, then repeat step 1.
+3. Watch `docker compose logs -f evolution-api` while connecting; the QR arrives a few seconds after `connect`.
+4. If it still fails, set `CONFIG_SESSION_PHONE_VERSION` (current WhatsApp Web version) under the
+   `evolution-api` environment in `docker-compose.yml`, or try the pairing code (2b).
 
 ## Tests
 
