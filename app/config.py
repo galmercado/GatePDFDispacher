@@ -38,5 +38,5 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
 DEFAULT_ADMIN_EMAIL = "admin@event.local"
 DEFAULT_ADMIN_PASSWORD = "admin1234"
 
-MAX_PDF_BYTES = 50 * 1024 * 1024
+MAX_PDF_BYTES = 200 * 1024 * 1024
 MAX_LIST_BYTES = 5 * 1024 * 1024
