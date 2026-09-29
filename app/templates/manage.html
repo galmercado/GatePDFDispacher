@@ -38,6 +38,64 @@
   </form>
 </section>
 
+{% set field = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-500/30" %}
+{% set label = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" %}
+<datalist id="ticket-types"><option value="Standard"><option value="VIP"><option value="Sponsor"></datalist>
+
+<section class="mt-5 rounded-2xl border border-slate-800 bg-slate-900 p-5">
+  <h2 class="mb-3 flex items-center gap-2 font-semibold text-white"><i class="ph ph-user-plus text-brand-400"></i> Add a guest manually</h2>
+  <form method="post" action="/events/{{ event.id }}/attendees" class="grid gap-3 sm:grid-cols-2">
+    <div><label class="{{ label }}" for="a-name">Name</label><input id="a-name" name="name" required maxlength="255" class="{{ field }}"></div>
+    <div><label class="{{ label }}" for="a-phone">Phone</label><input id="a-phone" name="phone" type="tel" required inputmode="tel" placeholder="052-5607772" class="{{ field }}"></div>
+    <div><label class="{{ label }}" for="a-email">Email</label><input id="a-email" name="email" type="email" class="{{ field }}"></div>
+    <div class="grid grid-cols-3 gap-3">
+      <div><label class="{{ label }}" for="a-age">Age</label><input id="a-age" name="age" type="number" min="0" max="120" class="{{ field }}"></div>
+      <div><label class="{{ label }}" for="a-count">Tickets</label><input id="a-count" name="ticket_count" type="number" min="1" max="50" value="1" required class="{{ field }}"></div>
+      <div><label class="{{ label }}" for="a-type">Type</label><input id="a-type" name="ticket_type" list="ticket-types" value="Standard" class="{{ field }}"></div>
+    </div>
+    <div class="sm:col-span-2"><label class="{{ label }}" for="a-notes">Notes</label><input id="a-notes" name="notes" class="{{ field }}"></div>
+    <button class="flex items-center justify-center gap-2 rounded-xl bg-brand-500 py-3 font-semibold text-white hover:bg-brand-600 sm:col-span-2"><i class="ph-bold ph-plus"></i> Add guest</button>
+  </form>
+</section>
+
+<section class="mt-5">
+  <div class="mb-3 flex items-center justify-between gap-3">
+    <h2 class="font-semibold text-white">Guests ({{ attendees|length }})</h2>
+    <input type="search" id="guest-filter" placeholder="Filter…" class="w-40 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white outline-none focus:border-brand-400">
+  </div>
+  <div id="guest-list" class="space-y-2">
+  {% for a in attendees %}
+  <details class="rounded-2xl border border-slate-800 bg-slate-900" data-search="{{ (a.name ~ ' ' ~ a.phone)|lower }}">
+    <summary class="flex cursor-pointer list-none items-center justify-between gap-3 p-3">
+      <div class="min-w-0"><p class="truncate font-medium text-white">{{ a.name }}</p><p class="text-xs text-slate-400">+{{ a.phone }} · {{ a.ticket_type }} · {{ a.ticket_count }} ticket(s){% if not a.tickets %} · <span class="text-rose-300">no PDF</span>{% endif %}</p></div>
+      <i class="ph ph-pencil-simple text-slate-500"></i>
+    </summary>
+    <form method="post" action="/attendees/{{ a.id }}/edit" class="grid gap-3 border-t border-slate-800 p-4 sm:grid-cols-2">
+      <div><label class="{{ label }}">Name</label><input name="name" value="{{ a.name }}" required class="{{ field }}"></div>
+      <div><label class="{{ label }}">Phone</label><input name="phone" value="{{ a.phone }}" required inputmode="tel" class="{{ field }}"></div>
+      <div><label class="{{ label }}">Email</label><input name="email" type="email" value="{{ a.email or '' }}" class="{{ field }}"></div>
+      <div class="grid grid-cols-3 gap-3">
+        <div><label class="{{ label }}">Age</label><input name="age" type="number" min="0" max="120" value="{{ a.age if a.age is not none else '' }}" class="{{ field }}"></div>
+        <div><label class="{{ label }}">Tickets</label><input name="ticket_count" type="number" min="1" max="50" value="{{ a.ticket_count }}" required class="{{ field }}"></div>
+        <div><label class="{{ label }}">Type</label><input name="ticket_type" list="ticket-types" value="{{ a.ticket_type }}" class="{{ field }}"></div>
+      </div>
+      <div class="sm:col-span-2"><label class="{{ label }}">Notes</label><input name="notes" value="{{ a.notes or '' }}" class="{{ field }}"></div>
+      <button class="flex items-center justify-center gap-2 rounded-xl bg-slate-800 py-2.5 font-semibold text-slate-100 hover:bg-slate-700"><i class="ph-bold ph-floppy-disk"></i> Save</button>
+      <button formaction="/attendees/{{ a.id }}/delete" formnovalidate
+              onclick="return confirm('Remove {{ a.name|replace("'", "")|e }} and their tickets?')"
+              class="flex items-center justify-center gap-2 rounded-xl border border-rose-500/40 py-2.5 font-semibold text-rose-300 hover:bg-rose-500/10"><i class="ph ph-trash"></i> Remove</button>
+    </form>
+  </details>
+  {% endfor %}
+  </div>
+</section>
+<script>
+  document.getElementById('guest-filter').addEventListener('input', (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll('#guest-list > details').forEach((d) => { d.hidden = q && !d.dataset.search.includes(q); });
+  });
+</script>
+
 <a href="/events/{{ event.id }}/door" class="mt-5 flex items-center justify-center gap-2 rounded-xl bg-emerald-500/15 py-3 font-semibold text-emerald-300 hover:bg-emerald-500/25">
   <i class="ph-bold ph-scan"></i> Open door cockpit</a>
 {% endblock %}

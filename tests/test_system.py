@@ -199,7 +199,7 @@ def test_anonymous_is_redirected_or_rejected(client, event_id):
 
 def test_doorman_cannot_use_admin_endpoints(admin, doorman, event_id):
     assert doorman.get("/events").status_code == 200
-    r = doorman.post("/events", data={"name": "X", "event_date": "2030-01-01T10:00"})
+    r = doorman.post("/events", data={"opponent": "Hapoel Holon", "event_date": "2030-01-01T10:00"})
     assert r.status_code == 403
     assert doorman.get(f"/events/{event_id}/manage").status_code == 403
     r = doorman.post(f"/events/{event_id}/attendees/import",
@@ -209,16 +209,21 @@ def test_doorman_cannot_use_admin_endpoints(admin, doorman, event_id):
     assert r.status_code == 403
     with SessionLocal() as db:
         assert db.query(Attendee).filter_by(event_id=event_id).count() == 0
-        assert db.query(Event).filter_by(name="X").count() == 0
+        assert db.query(Event).filter_by(name="Maccabi Tel Aviv vs. Hapoel Holon").count() == 0
 
 
 def test_admin_can_create_event(admin):
-    r = admin.post("/events", data={"name": "Fundraiser", "location": "Park",
-                                    "event_date": "2031-06-01T18:30"})
+    r = admin.post("/events", data={"opponent": "Hapoel Jerusalem", "event_date": "2031-06-01T18:30"})
     assert r.status_code == 303
-    assert "Fundraiser" in admin.get("/events").text
-    r = admin.post("/events", data={"name": "  ", "event_date": "bad"})
-    assert r.status_code == 422
+    page = admin.get("/events").text
+    assert "Maccabi Tel Aviv vs. Hapoel Jerusalem" in page and "Home (Menora Mivtachim Arena)" in page
+    r = admin.post("/events", data={"opponent": "__other__", "opponent_other": "Zalgiris",
+                                    "location": "__other__", "location_other": "Kaunas Hall",
+                                    "event_date": "2031-07-01T20:00"})
+    assert r.status_code == 303 and "Maccabi Tel Aviv vs. Zalgiris" in admin.get("/events").text
+    assert admin.post("/events", data={"opponent": "__other__", "opponent_other": "  ",
+                                       "event_date": "2031-07-01T20:00"}).status_code == 422
+    assert admin.post("/events", data={"opponent": "Hapoel Holon", "event_date": "bad"}).status_code == 422
 
 
 def test_doorman_cockpit_search_toggle_stats_qr(admin, doorman, event_id):
@@ -242,7 +247,7 @@ def test_doorman_cockpit_search_toggle_stats_qr(admin, doorman, event_id):
     assert "Waiting" in r.text
     assert 'id="stat-admitted">0<' in doorman.get(f"/events/{event_id}/stats").text
 
-    qr = doorman.get(f"/attendees/{ada}/qr")
+    qr = doorman.post(f"/attendees/{ada}/qr")
     assert qr.text.count("data:image/svg+xml") == 2
     with SessionLocal() as db:
         token = db.get(Attendee, ada).tickets[0].claim_token
@@ -443,12 +448,12 @@ def test_visiting_upload_urls_directly_redirects_to_manage(admin, doorman, event
 def test_qr_uses_reachable_base_url(admin, doorman, event_id, monkeypatch):
     ada = seeded_event(admin, event_id)
     monkeypatch.setattr(config, "PUBLIC_BASE_URL", "http://localhost:8000")
-    r = doorman.get(f"/attendees/{ada}/qr", headers={"host": "192.168.1.20:8000"})
+    r = doorman.post(f"/attendees/{ada}/qr", headers={"host": "192.168.1.20:8000"})
     assert "http://192.168.1.20:8000/tickets/claim/" in r.text and "/ticket.pdf" in r.text and "can't open" not in r.text
-    r = doorman.get(f"/attendees/{ada}/qr", headers={"host": "localhost:8000"})
+    r = doorman.post(f"/attendees/{ada}/qr", headers={"host": "localhost:8000"})
     assert "can&#39;t open" in r.text or "can't open" in r.text
     monkeypatch.setattr(config, "PUBLIC_BASE_URL", "https://tickets.example.org")
-    assert "https://tickets.example.org/tickets/claim/" in doorman.get(f"/attendees/{ada}/qr").text
+    assert "https://tickets.example.org/tickets/claim/" in doorman.post(f"/attendees/{ada}/qr").text
 
 
 def test_gateway_error_details_are_surfaced(tmp_path):
@@ -487,3 +492,54 @@ def test_import_and_search_use_normalised_phones(admin, doorman, event_id):
     assert phones == ["972525607772", "972525607773"]
     for q in ("0525607772", "525607772", "972525607772"):
         assert "Dana Levi" in doorman.get(f"/events/{event_id}/search", params={"q": q}).text
+
+
+def test_whatsapp_and_qr_admit_the_guest(admin, doorman, event_id, monkeypatch):
+    ada = seeded_event(admin, event_id)
+
+    async def boom(*a, **k):
+        raise services.WhatsAppError("gateway down")
+
+    monkeypatch.setattr("app.main.send_whatsapp_pdf", boom)
+    r = doorman.post(f"/attendees/{ada}/whatsapp")       # admitted even though the send failed
+    assert "Admitted" in r.text and "refreshStats" in r.headers["HX-Trigger"] and "toast" in r.headers["HX-Trigger"]
+    with SessionLocal() as db:
+        first = db.get(Attendee, ada).checked_in_at
+        assert db.get(Attendee, ada).checked_in
+    doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})   # undo
+    r = doorman.post(f"/attendees/{ada}/qr")             # QR re-admits and refreshes the card out-of-band
+    assert 'hx-swap-oob="true"' in r.text and "Admitted" in r.text
+    assert r.headers["HX-Trigger"] == "refreshStats"
+    r = doorman.post(f"/attendees/{ada}/qr")             # idempotent: never un-admits
+    with SessionLocal() as db:
+        assert db.get(Attendee, ada).checked_in and db.get(Attendee, ada).checked_in_at >= first
+    assert 'id="stat-admitted">2<' in doorman.get(f"/events/{event_id}/stats").text
+
+
+def test_manual_attendee_add_edit_delete(admin, doorman, event_id):
+    form = {"name": "Yael Cohen", "phone": "050-1234567", "ticket_count": "3", "ticket_type": "VIP",
+            "email": "", "age": "34", "notes": "Aisle seat"}
+    r = admin.post(f"/events/{event_id}/attendees", data=form)
+    assert r.status_code == 200 and "Added Yael Cohen" in r.text
+    with SessionLocal() as db:
+        a = db.query(Attendee).filter_by(event_id=event_id, name="Yael Cohen").one()
+        assert a.phone == "972501234567" and a.ticket_count == 3 and a.age == 34 and a.email is None
+        aid = a.id
+    assert admin.post(f"/events/{event_id}/attendees", data=form).status_code == 422   # duplicate
+    assert admin.post(f"/events/{event_id}/attendees", data={**form, "name": "", "phone": "1"}).status_code == 422
+
+    r = admin.post(f"/attendees/{aid}/edit", data={**form, "name": "Yael Levi", "ticket_count": "2"})
+    assert r.status_code == 200 and "Updated Yael Levi" in r.text
+    assert admin.post(f"/attendees/{aid}/edit", data={**form, "age": "999"}).status_code == 422
+    with SessionLocal() as db:
+        assert db.get(Attendee, aid).name == "Yael Levi" and db.get(Attendee, aid).ticket_count == 2
+
+    for c in (doorman,):
+        assert c.post(f"/events/{event_id}/attendees", data=form).status_code == 403
+        assert c.post(f"/attendees/{aid}/edit", data=form).status_code == 403
+        assert c.post(f"/attendees/{aid}/delete").status_code == 403
+
+    r = admin.post(f"/attendees/{aid}/delete")
+    assert r.status_code == 200 and "Removed Yael Levi" in r.text
+    with SessionLocal() as db:
+        assert db.get(Attendee, aid) is None

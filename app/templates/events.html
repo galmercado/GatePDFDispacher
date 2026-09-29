@@ -49,24 +49,74 @@
 </div>
 
 {% if user.role.value == 'admin' %}
-<dialog id="event-modal" class="w-[calc(100%-2rem)] max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-0 text-slate-200 backdrop:bg-black/70 backdrop:backdrop-blur-sm">
+<style>
+  .flatpickr-calendar.inline { width: 100%; max-width: 100%; box-shadow: none; border: 1px solid #334155; }
+  .flatpickr-calendar.inline .flatpickr-innerContainer, .flatpickr-calendar.inline .flatpickr-rContainer,
+  .flatpickr-calendar.inline .flatpickr-days, .flatpickr-calendar.inline .dayContainer { width: 100%; min-width: 100%; max-width: 100%; }
+  .flatpickr-calendar.inline .flatpickr-day { max-width: none; }
+</style>
+<dialog id="event-modal" class="max-h-[92vh] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 p-0 text-slate-200 backdrop:bg-black/70 backdrop:backdrop-blur-sm">
   <form method="post" action="/events" class="p-6">
     <div class="mb-4 flex items-center justify-between">
       <h2 class="text-lg font-semibold text-white">Schedule event</h2>
       <button type="button" onclick="this.closest('dialog').close()" class="text-slate-400 hover:text-white" aria-label="Close"><i class="ph ph-x text-xl"></i></button>
     </div>
     {% if error %}<div class="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">{{ error }}</div>{% endif %}
-    {% set field = "mb-4 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-base text-white outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-500/30" %}
-    <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" for="ev-name">Name</label>
-    <input id="ev-name" name="name" required maxlength="255" class="{{ field }}" placeholder="Spring Gala">
-    <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" for="ev-loc">Location</label>
-    <input id="ev-loc" name="location" maxlength="255" class="{{ field }}" placeholder="Community Hall">
-    <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" for="ev-date">Date &amp; time</label>
-    <input id="ev-date" name="event_date" type="datetime-local" required class="{{ field }} [color-scheme:dark]">
+    {% set field = "mb-3 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-base text-white outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-500/30" %}
+    {% set label = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" %}
+
+    <label class="{{ label }}" for="ev-opp">Opponent</label>
+    <div class="mb-1 flex items-center gap-2 rounded-xl bg-slate-950/60 px-3 py-2 text-sm text-slate-300"><i class="ph-fill ph-basketball text-amber-400"></i> Maccabi Tel Aviv <span class="text-slate-500">vs.</span></div>
+    <select id="ev-opp" name="opponent" class="{{ field }}" data-other-target="ev-opp-other">
+      {% for t in opponents %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+      <option value="{{ OTHER }}">Other (type a name)…</option>
+    </select>
+    <input id="ev-opp-other" name="opponent_other" maxlength="120" placeholder="Opponent name" class="{{ field }} hidden">
+
+    <label class="{{ label }}" for="ev-loc">Location</label>
+    <select id="ev-loc" name="location" class="{{ field }}" data-other-target="ev-loc-other">
+      {% for a in arenas %}<option value="{{ a }}" {{ 'selected' if a == default_location }}>{{ a }}</option>{% endfor %}
+      <option value="{{ OTHER }}">Other (type a venue)…</option>
+    </select>
+    <input id="ev-loc-other" name="location_other" maxlength="120" placeholder="Venue name" class="{{ field }} hidden">
+
+    <label class="{{ label }}" for="ev-date">Date &amp; time <span id="ev-date-label" class="ml-1 normal-case tracking-normal text-brand-400"></span></label>
+    <input id="ev-date" name="event_date" type="text" class="mb-4">
     <button class="flex w-full items-center justify-center gap-2 rounded-xl bg-brand-500 py-3 font-semibold text-white hover:bg-brand-600">
       <i class="ph-bold ph-check"></i> Create event</button>
   </form>
 </dialog>
-{% if open_modal %}<script>document.getElementById('event-modal').showModal();</script>{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if user.role.value == 'admin' %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/themes/dark.css">
+<script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
+<script>
+  // "Other" options reveal a free-text box
+  document.querySelectorAll('select[data-other-target]').forEach((sel) => {
+    const box = document.getElementById(sel.dataset.otherTarget);
+    const sync = () => {
+      const other = sel.value === '{{ OTHER }}';
+      box.classList.toggle('hidden', !other);
+      box.required = other;
+      if (other) box.focus();
+    };
+    sel.addEventListener('change', sync);
+    sync();
+  });
+  {% if open_modal %}document.getElementById('event-modal').showModal();{% endif %}
+  // Inline calendar with 24h time; weeks start on Sunday
+  const label = document.getElementById('ev-date-label');
+  const describe = (d) => { label.textContent = d.length ? d[0].toLocaleString('en-GB', {weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'}) : ''; };
+  const start = new Date(); start.setHours(20, 0, 0, 0);
+  flatpickr('#ev-date', {
+    inline: true, enableTime: true, time_24hr: true, minuteIncrement: 5,
+    dateFormat: 'Y-m-d\\TH:i', defaultDate: start, locale: {firstDayOfWeek: 0},
+    onReady: (d) => describe(d), onChange: (d) => describe(d),
+  });
+</script>
 {% endif %}
 {% endblock %}

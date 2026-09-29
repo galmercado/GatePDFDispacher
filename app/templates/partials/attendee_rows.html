@@ -1,5 +1,5 @@
 {% for a in attendees %}
-<article id="attendee-{{ a.id }}" class="pop rounded-2xl border p-4 {{ 'border-emerald-500/40 bg-emerald-950/30' if a.checked_in else 'border-slate-800 bg-slate-900' }}">
+<article id="attendee-{{ a.id }}"{% if oob %} hx-swap-oob="true"{% endif %} class="pop rounded-2xl border p-4 {{ 'border-emerald-500/40 bg-emerald-950/30' if a.checked_in else 'border-slate-800 bg-slate-900' }}">
   <div class="flex items-start justify-between gap-3">
     <div class="min-w-0">
       <h3 class="truncate text-base font-semibold text-white">{{ a.name }}</h3>
@@ -17,19 +17,23 @@
   </div>
   {% if a.checked_in and a.checked_in_at %}<p class="mt-2 text-xs text-emerald-400/70">Checked in {{ a.checked_in_at.strftime('%H:%M') }} UTC</p>{% endif %}
 
-  <div class="mt-3 grid grid-cols-[1fr_auto_auto] gap-2">
-    <button hx-post="/attendees/{{ a.id }}/toggle" hx-target="#attendee-{{ a.id }}" hx-swap="outerHTML"
-            class="flex items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold {{ 'bg-slate-800 text-slate-200 hover:bg-slate-700' if a.checked_in else 'bg-emerald-500 text-emerald-950 hover:bg-emerald-400' }}">
-      {% if a.checked_in %}<i class="ph-bold ph-arrow-u-up-left"></i> Undo check-in{% else %}<i class="ph-bold ph-check"></i> Admit{% endif %}
-    </button>
+  {# WhatsApp and QR both admit the guest; the small button on the side toggles admission only. #}
+  <div class="mt-3 grid grid-cols-[1fr_1fr_auto] gap-2">
     <button hx-post="/attendees/{{ a.id }}/whatsapp" hx-target="#attendee-{{ a.id }}" hx-swap="outerHTML"
-            hx-disabled-elt="this" hx-indicator="this" aria-label="Send ticket via WhatsApp"
-            class="flex w-12 items-center justify-center rounded-xl bg-slate-800 text-xl text-green-400 hover:bg-slate-700 disabled:opacity-50">
-      <i class="ph-fill ph-whatsapp-logo"></i>
+            hx-disabled-elt="this" aria-label="Admit and send ticket via WhatsApp"
+            class="flex h-16 flex-col items-center justify-center gap-0.5 rounded-2xl bg-green-500 text-green-950 hover:bg-green-400 disabled:opacity-50">
+      <i class="ph-fill ph-whatsapp-logo text-3xl"></i><span class="text-xs font-bold uppercase tracking-wide">WhatsApp</span>
     </button>
-    <button hx-get="/attendees/{{ a.id }}/qr" hx-target="#qr-content" hx-swap="innerHTML" aria-label="Show QR code"
-            class="flex w-12 items-center justify-center rounded-xl bg-slate-800 text-xl text-brand-400 hover:bg-slate-700">
-      <i class="ph ph-qr-code"></i>
+    <button hx-post="/attendees/{{ a.id }}/qr" hx-target="#qr-content" hx-swap="innerHTML"
+            hx-disabled-elt="this" aria-label="Admit and show QR code"
+            class="flex h-16 flex-col items-center justify-center gap-0.5 rounded-2xl bg-brand-500 text-white hover:bg-brand-400 disabled:opacity-50">
+      <i class="ph-bold ph-qr-code text-3xl"></i><span class="text-xs font-bold uppercase tracking-wide">QR</span>
+    </button>
+    <button hx-post="/attendees/{{ a.id }}/toggle" hx-target="#attendee-{{ a.id }}" hx-swap="outerHTML"
+            aria-label="{{ 'Undo check-in' if a.checked_in else 'Admit without sending' }}"
+            title="{{ 'Undo check-in' if a.checked_in else 'Admit without sending' }}"
+            class="flex w-12 flex-col items-center justify-center gap-0.5 self-center rounded-xl py-2 text-[10px] font-medium {{ 'bg-slate-800 text-slate-400 hover:bg-slate-700' if a.checked_in else 'border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10' }}">
+      {% if a.checked_in %}<i class="ph ph-arrow-u-up-left text-base"></i>Undo{% else %}<i class="ph-bold ph-check text-base"></i>Admit{% endif %}
     </button>
   </div>
 </article>

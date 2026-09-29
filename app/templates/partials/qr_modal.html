@@ -22,3 +22,5 @@
 <div class="rounded-xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
   <i class="ph ph-file-x text-3xl"></i><p class="mt-1">No ticket PDF attached yet.</p></div>
 {% endfor %}
+{# also refresh the guest's card behind the modal (now Admitted) #}
+{% with attendees=[attendee], oob=True, q="x" %}{% include "partials/attendee_rows.html" %}{% endwith %}
