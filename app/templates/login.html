@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block body %}
+<div class="relative flex min-h-screen items-center justify-center overflow-hidden px-4">
+  <div class="pointer-events-none absolute -left-24 -top-24 h-72 w-72 rounded-full bg-brand-600/30 blur-3xl"></div>
+  <div class="pointer-events-none absolute -bottom-24 -right-24 h-80 w-80 rounded-full bg-emerald-500/20 blur-3xl"></div>
+
+  <form method="post" action="/login"
+        class="pop relative w-full max-w-sm rounded-2xl border border-white/10 bg-white/5 p-7 shadow-2xl backdrop-blur-xl">
+    <div class="mb-6 flex flex-col items-center gap-2 text-center">
+      <div class="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-500/20 text-2xl text-brand-400">
+        <i class="ph-fill ph-ticket"></i></div>
+      <h1 class="text-xl font-semibold text-white">Welcome to Gate</h1>
+      <p class="text-sm text-slate-400">Sign in to manage the door.</p>
+    </div>
+
+    {% if error %}
+    <div class="mb-4 flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">
+      <i class="ph-fill ph-warning-circle"></i> {{ error }}</div>
+    {% endif %}
+
+    <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" for="email">Email</label>
+    <input id="email" name="email" type="email" required autocomplete="username" value="{{ email }}"
+           class="mb-4 w-full rounded-xl border border-white/10 bg-slate-900/60 px-4 py-3 text-base text-white placeholder-slate-500 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-500/30"
+           placeholder="you@example.org">
+    <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" for="password">Password</label>
+    <input id="password" name="password" type="password" required autocomplete="current-password"
+           class="mb-6 w-full rounded-xl border border-white/10 bg-slate-900/60 px-4 py-3 text-base text-white outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-500/30">
+    <button class="flex w-full items-center justify-center gap-2 rounded-xl bg-brand-500 py-3 font-semibold text-white hover:bg-brand-600">
+      <i class="ph-bold ph-sign-in"></i> Sign in</button>
+  </form>
+</div>
+{% endblock %}

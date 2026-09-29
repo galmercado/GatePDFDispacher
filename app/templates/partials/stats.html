@@ -1,0 +1,17 @@
+<div class="grid grid-cols-3 gap-2 text-center">
+  <div class="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-2 py-2">
+    <p class="text-2xl font-bold leading-none text-emerald-300" id="stat-admitted">{{ stats.admitted }}</p>
+    <p class="mt-1 text-[11px] uppercase tracking-wide text-emerald-400/80">Admitted</p>
+  </div>
+  <div class="rounded-xl border border-amber-500/20 bg-amber-500/10 px-2 py-2">
+    <p class="text-2xl font-bold leading-none text-amber-300" id="stat-remaining">{{ stats.remaining }}</p>
+    <p class="mt-1 text-[11px] uppercase tracking-wide text-amber-400/80">Remaining</p>
+  </div>
+  <div class="rounded-xl border border-slate-700 bg-slate-900 px-2 py-2">
+    <p class="text-2xl font-bold leading-none text-white">{{ stats.total }}</p>
+    <p class="mt-1 text-[11px] uppercase tracking-wide text-slate-400">Total</p>
+  </div>
+</div>
+<div class="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800" role="progressbar" aria-valuenow="{{ stats.percent }}" aria-valuemin="0" aria-valuemax="100">
+  <div class="h-full rounded-full bg-emerald-500 transition-all duration-500" style="width: {{ stats.percent }}%"></div>
+</div>

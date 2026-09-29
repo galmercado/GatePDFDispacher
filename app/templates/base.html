@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <title>{% block title %}Gate{% endblock %} · Gate</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: { extend: {
+        fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'] },
+        colors: { brand: { 400: '#818cf8', 500: '#6366f1', 600: '#4f46e5' } }
+      } }
+    }
+  </script>
+  <script src="https://unpkg.com/@phosphor-icons/web@2.1.1"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <style>
+    body { -webkit-tap-highlight-color: transparent; }
+    .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
+    .htmx-indicator { opacity: 0; transition: opacity 150ms; }
+    button:active:not(:disabled) { transform: scale(.97); }
+    button, a { transition: background-color .15s, transform .1s, border-color .15s, color .15s; }
+    @keyframes pop { from { transform: scale(.96); opacity: 0 } to { transform: scale(1); opacity: 1 } }
+    .pop { animation: pop .18s ease-out; }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-950 font-sans text-slate-200 antialiased">
+  {% block body %}
+  <header class="sticky top-0 z-30 border-b border-slate-800 bg-slate-950/85 backdrop-blur">
+    <div class="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
+      <a href="/events" class="flex items-center gap-2 font-semibold text-white">
+        <i class="ph-fill ph-ticket text-xl text-brand-400"></i> Gate
+      </a>
+      {% if user %}
+      <div class="flex items-center gap-3 text-sm">
+        <span class="hidden text-slate-400 sm:inline">{{ user.full_name }}
+          <span class="ml-1 rounded-full bg-slate-800 px-2 py-0.5 text-xs uppercase tracking-wide text-slate-300">{{ user.role.value }}</span></span>
+        <form method="post" action="/logout">
+          <button class="flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800" aria-label="Sign out">
+            <i class="ph ph-sign-out"></i><span>Sign out</span>
+          </button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+  </header>
+  <main class="mx-auto max-w-3xl px-4 pb-24 pt-5">{% block content %}{% endblock %}</main>
+  {% endblock %}
+
+  <div id="toasts" class="pointer-events-none fixed inset-x-0 bottom-4 z-50 flex flex-col items-center gap-2 px-4" aria-live="polite"></div>
+
+  <script>
+    function showToast(message, kind) {
+      const el = document.createElement('div');
+      const ok = kind !== 'error';
+      el.className = 'pop pointer-events-auto flex max-w-sm items-center gap-2 rounded-xl border px-4 py-3 text-sm shadow-xl ' +
+        (ok ? 'border-emerald-500/30 bg-emerald-950 text-emerald-200' : 'border-rose-500/30 bg-rose-950 text-rose-200');
+      const icon = document.createElement('i');
+      icon.className = 'ph-fill ' + (ok ? 'ph-check-circle' : 'ph-warning-circle') + ' text-lg';
+      const text = document.createElement('span');
+      text.textContent = message;
+      el.append(icon, text);
+      document.getElementById('toasts').appendChild(el);
+      setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 300); }, 3800);
+    }
+    document.body.addEventListener('toast', (e) => showToast(e.detail.message, e.detail.kind));
+    document.body.addEventListener('htmx:responseError', (e) => {
+      if (e.detail.xhr.status === 401) return;
+      showToast(e.detail.xhr.responseText || 'Request failed', 'error');
+    });
+    document.body.addEventListener('htmx:sendError', () => showToast('Network error - check your connection', 'error'));
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

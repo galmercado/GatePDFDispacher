@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Events{% endblock %}
+{% block content %}
+<div class="mb-5 flex items-center justify-between">
+  <h1 class="text-2xl font-bold text-white">Events</h1>
+  {% if user.role.value == 'admin' %}
+  <button onclick="document.getElementById('event-modal').showModal()"
+          class="flex items-center gap-2 rounded-xl bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-600">
+    <i class="ph-bold ph-plus"></i> Schedule event</button>
+  {% endif %}
+</div>
+
+<div class="space-y-3">
+  {% for e in events %}
+  {% set s = stats[e.id] %}
+  <div class="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h2 class="truncate text-lg font-semibold text-white">{{ e.name }}</h2>
+        <p class="mt-0.5 flex flex-wrap items-center gap-x-3 text-sm text-slate-400">
+          <span><i class="ph ph-calendar-blank"></i> {{ e.event_date.strftime('%a %d %b %Y, %H:%M') }}</span>
+          {% if e.location %}<span><i class="ph ph-map-pin"></i> {{ e.location }}</span>{% endif %}
+        </p>
+      </div>
+      <div class="shrink-0 text-right text-sm">
+        <p class="font-semibold text-white">{{ s.admitted }}<span class="text-slate-500"> / {{ s.total }}</span></p>
+        <p class="text-xs text-slate-500">admitted</p>
+      </div>
+    </div>
+    <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-800">
+      <div class="h-full rounded-full bg-emerald-500" style="width: {{ s.percent }}%"></div></div>
+    <div class="mt-4 flex gap-2">
+      <a href="/events/{{ e.id }}/door"
+         class="flex flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-500/15 py-2.5 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/25">
+        <i class="ph-bold ph-scan"></i> Open door</a>
+      {% if user.role.value == 'admin' %}
+      <a href="/events/{{ e.id }}/manage"
+         class="flex items-center justify-center gap-2 rounded-xl border border-slate-700 px-4 py-2.5 text-sm font-medium text-slate-300 hover:bg-slate-800">
+        <i class="ph ph-gear"></i> Manage</a>
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+  <div class="rounded-2xl border border-dashed border-slate-700 p-10 text-center text-slate-400">
+    <i class="ph ph-calendar-x text-4xl"></i>
+    <p class="mt-2">No events yet.{% if user.role.value == 'admin' %} Schedule your first one.{% endif %}</p>
+  </div>
+  {% endfor %}
+</div>
+
+{% if user.role.value == 'admin' %}
+<dialog id="event-modal" class="w-[calc(100%-2rem)] max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-0 text-slate-200 backdrop:bg-black/70 backdrop:backdrop-blur-sm">
+  <form method="post" action="/events" class="p-6">
+    <div class="mb-4 flex items-center justify-between">
+      <h2 class="text-lg font-semibold text-white">Schedule event</h2>
+      <button type="button" onclick="this.closest('dialog').close()" class="text-slate-400 hover:text-white" aria-label="Close"><i class="ph ph-x text-xl"></i></button>
+    </div>
+    {% if error %}<div class="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">{{ error }}</div>{% endif %}
+    {% set field = "mb-4 w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-base text-white outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-500/30" %}
+    <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" for="ev-name">Name</label>
+    <input id="ev-name" name="name" required maxlength="255" class="{{ field }}" placeholder="Spring Gala">
+    <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" for="ev-loc">Location</label>
+    <input id="ev-loc" name="location" maxlength="255" class="{{ field }}" placeholder="Community Hall">
+    <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" for="ev-date">Date &amp; time</label>
+    <input id="ev-date" name="event_date" type="datetime-local" required class="{{ field }} [color-scheme:dark]">
+    <button class="flex w-full items-center justify-center gap-2 rounded-xl bg-brand-500 py-3 font-semibold text-white hover:bg-brand-600">
+      <i class="ph-bold ph-check"></i> Create event</button>
+  </form>
+</dialog>
+{% if open_modal %}<script>document.getElementById('event-modal').showModal();</script>{% endif %}
+{% endif %}
+{% endblock %}

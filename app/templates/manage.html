@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Manage {{ event.name }}{% endblock %}
+{% block content %}
+<a href="/events" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-400 hover:text-white"><i class="ph ph-arrow-left"></i> Events</a>
+<h1 class="text-2xl font-bold text-white">{{ event.name }}</h1>
+<p class="mb-5 text-sm text-slate-400">{{ stats.guests }} guest(s) · {{ stats.total }} ticket(s) · {{ ticket_files }} PDF ticket(s) attached</p>
+
+{% for m in messages %}
+<div class="mb-4 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200" role="status">
+  <i class="ph-fill ph-check-circle"></i> {{ m }}</div>
+{% endfor %}
+{% if errors %}
+<div class="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">
+  <p class="mb-1 font-medium"><i class="ph-fill ph-warning-circle"></i> Nothing was saved:</p>
+  <ul class="list-inside list-disc space-y-0.5">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+</div>
+{% endif %}
+
+<section class="mb-4 rounded-2xl border border-slate-800 bg-slate-900 p-5">
+  <h2 class="mb-1 flex items-center gap-2 font-semibold text-white"><i class="ph ph-users-three text-brand-400"></i> 1. Import guest list</h2>
+  <p class="mb-3 text-sm text-slate-400">.xlsx or .json. Columns: <code class="text-slate-300">name, phone</code> (required),
+    <code class="text-slate-300">email, age, ticket_type, ticket_count, notes</code>. Any invalid row rejects the whole file.</p>
+  <form method="post" action="/events/{{ event.id }}/attendees/import" enctype="multipart/form-data" class="flex flex-col gap-3 sm:flex-row">
+    <input type="file" name="file" accept=".xlsx,.json" required
+           class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-3 file:text-slate-200">
+    <button class="flex items-center justify-center gap-2 rounded-xl bg-brand-500 px-5 py-3 text-sm font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-upload-simple"></i> Import</button>
+  </form>
+</section>
+
+<section class="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+  <h2 class="mb-1 flex items-center gap-2 font-semibold text-white"><i class="ph ph-file-pdf text-brand-400"></i> 2. Upload merged ticket PDF</h2>
+  <p class="mb-3 text-sm text-slate-400">One page per ticket, in guest-list order. Page count must equal the total ticket count
+    ({{ stats.total }}). Re-uploading replaces existing tickets.</p>
+  <form method="post" action="/events/{{ event.id }}/tickets/upload" enctype="multipart/form-data" class="flex flex-col gap-3 sm:flex-row">
+    <input type="file" name="file" accept="application/pdf,.pdf" required
+           class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-3 file:text-slate-200">
+    <button class="flex items-center justify-center gap-2 rounded-xl bg-brand-500 px-5 py-3 text-sm font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-scissors"></i> Split &amp; attach</button>
+  </form>
+</section>
+
+<a href="/events/{{ event.id }}/door" class="mt-5 flex items-center justify-center gap-2 rounded-xl bg-emerald-500/15 py-3 font-semibold text-emerald-300 hover:bg-emerald-500/25">
+  <i class="ph-bold ph-scan"></i> Open door cockpit</a>
+{% endblock %}

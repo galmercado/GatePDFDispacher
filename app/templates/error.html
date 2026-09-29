@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block body %}
+<div class="flex min-h-screen items-center justify-center px-4 text-center">
+  <div>
+    <p class="text-6xl font-bold text-slate-700">{{ code }}</p>
+    <h1 class="mt-2 text-xl font-semibold text-white">{{ title }}</h1>
+    <p class="mt-1 text-slate-400">{{ detail }}</p>
+    <a href="/events" class="mt-6 inline-flex items-center gap-2 rounded-xl bg-brand-500 px-4 py-2 font-medium text-white hover:bg-brand-600">
+      <i class="ph ph-arrow-left"></i> Back to events</a>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,41 @@
+{% for a in attendees %}
+<article id="attendee-{{ a.id }}" class="pop rounded-2xl border p-4 {{ 'border-emerald-500/40 bg-emerald-950/30' if a.checked_in else 'border-slate-800 bg-slate-900' }}">
+  <div class="flex items-start justify-between gap-3">
+    <div class="min-w-0">
+      <h3 class="truncate text-base font-semibold text-white">{{ a.name }}</h3>
+      <p class="mt-0.5 text-sm text-slate-400"><i class="ph ph-phone"></i> +{{ a.phone }}</p>
+      <div class="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+        <span class="rounded-full px-2 py-0.5 font-medium {{ 'bg-amber-500/15 text-amber-300' if a.ticket_type|lower in ('vip', 'sponsor') else 'bg-slate-800 text-slate-300' }}">{{ a.ticket_type }}</span>
+        <span class="rounded-full bg-slate-800 px-2 py-0.5 text-slate-300"><i class="ph ph-ticket"></i> {{ a.ticket_count }}</span>
+        {% if not a.tickets %}<span class="rounded-full bg-rose-500/15 px-2 py-0.5 text-rose-300">No PDF</span>{% endif %}
+      </div>
+      {% if a.notes %}<p class="mt-2 text-sm italic text-slate-400"><i class="ph ph-note"></i> {{ a.notes }}</p>{% endif %}
+    </div>
+    <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold {{ 'bg-emerald-500/20 text-emerald-300' if a.checked_in else 'bg-slate-800 text-slate-300' }}">
+      {% if a.checked_in %}<i class="ph-fill ph-check-circle"></i> Admitted{% else %}<i class="ph ph-hourglass-medium"></i> Waiting{% endif %}
+    </span>
+  </div>
+  {% if a.checked_in and a.checked_in_at %}<p class="mt-2 text-xs text-emerald-400/70">Checked in {{ a.checked_in_at.strftime('%H:%M') }} UTC</p>{% endif %}
+
+  <div class="mt-3 grid grid-cols-[1fr_auto_auto] gap-2">
+    <button hx-post="/attendees/{{ a.id }}/toggle" hx-target="#attendee-{{ a.id }}" hx-swap="outerHTML"
+            class="flex items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold {{ 'bg-slate-800 text-slate-200 hover:bg-slate-700' if a.checked_in else 'bg-emerald-500 text-emerald-950 hover:bg-emerald-400' }}">
+      {% if a.checked_in %}<i class="ph-bold ph-arrow-u-up-left"></i> Undo check-in{% else %}<i class="ph-bold ph-check"></i> Admit{% endif %}
+    </button>
+    <button hx-post="/attendees/{{ a.id }}/whatsapp" hx-target="#attendee-{{ a.id }}" hx-swap="outerHTML"
+            hx-disabled-elt="this" hx-indicator="this" aria-label="Send ticket via WhatsApp"
+            class="flex w-12 items-center justify-center rounded-xl bg-slate-800 text-xl text-green-400 hover:bg-slate-700 disabled:opacity-50">
+      <i class="ph-fill ph-whatsapp-logo"></i>
+    </button>
+    <button hx-get="/attendees/{{ a.id }}/qr" hx-target="#qr-content" hx-swap="innerHTML" aria-label="Show QR code"
+            class="flex w-12 items-center justify-center rounded-xl bg-slate-800 text-xl text-brand-400 hover:bg-slate-700">
+      <i class="ph ph-qr-code"></i>
+    </button>
+  </div>
+</article>
+{% else %}
+<div class="rounded-2xl border border-dashed border-slate-700 p-10 text-center text-slate-400">
+  <i class="ph ph-user-focus text-4xl"></i>
+  <p class="mt-2">{% if q %}No guests match “{{ q }}”.{% else %}No guests yet.{% endif %}</p>
+</div>
+{% endfor %}
