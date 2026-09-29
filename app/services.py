@@ -246,10 +246,15 @@ def parse_guest_list(filename: str, content: bytes) -> list[AttendeeIn]:
     return parsed
 
 
-def import_attendees(db: Session, event_id: int, items: list[AttendeeIn]) -> int:
-    db.add_all(Attendee(event_id=event_id, **item.model_dump()) for item in items)
+def import_attendees(db: Session, event_id: int, items: list[AttendeeIn]) -> tuple[int, int]:
+    """Add guests; anyone already on the event (same name + phone) is skipped, so re-importing
+    a list never duplicates people or inflates the ticket total. Returns (added, skipped)."""
+    existing = {(a.name.lower(), a.phone) for a in
+                db.query(Attendee.name, Attendee.phone).filter(Attendee.event_id == event_id)}
+    new = [i for i in items if (i.name.lower(), i.phone) not in existing]
+    db.add_all(Attendee(event_id=event_id, **item.model_dump()) for item in new)
     db.commit()
-    return len(items)
+    return len(new), len(items) - len(new)
 
 
 # --------------------------------------------------------------------------- PDFs
@@ -308,7 +313,9 @@ def map_pdf_to_attendees(db: Session, event_id: int, content: bytes) -> tuple[in
         raise PdfProcessingError(f"Not a valid PDF: {exc}")
     if page_count < needed:
         raise PdfProcessingError(
-            f"The PDF has only {page_count} page(s) but the guest list needs {needed} ticket(s)"
+            f"The PDF has only {page_count} page(s) but the guest list needs {needed} ticket(s) "
+            f"({len(attendees)} guests: {sum(a.adult_count for a in attendees)} adult + "
+            f"{sum(a.youth_count for a in attendees)} youth). One page is needed per ticket, not per guest"
         )
 
     paths = split_pdf(content, event_id)

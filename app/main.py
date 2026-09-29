@@ -356,9 +356,10 @@ async def import_guest_list(
     except ImportValidationError as exc:
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=exc.errors[:50]), status=422)
-    count = import_attendees(db, event.id, items)
+    count, skipped = import_attendees(db, event.id, items)
     return render(request, "manage.html",
-                  manage_ctx(db, user, event, messages=[f"Imported {count} guest(s)."]))
+                  manage_ctx(db, user, event, messages=[f"Imported {count} guest(s)."
+                                    + (f" Skipped {skipped} already on the list." if skipped else "")]))
 
 
 @app.post("/events/{event_id}/tickets/upload", response_class=HTMLResponse)

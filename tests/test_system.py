@@ -136,6 +136,11 @@ def test_import_endpoint_is_atomic(admin, event_id):
     r = admin.post(f"/events/{event_id}/attendees/import",
                    files={"file": ("g.json", json.dumps(GUESTS).encode())})
     assert r.status_code == 200 and "Imported 3 guest(s)" in r.text
+    r = admin.post(f"/events/{event_id}/attendees/import",                      # re-import: no duplicates
+                   files={"file": ("g.json", json.dumps(GUESTS).encode())})
+    assert "Imported 0 guest(s). Skipped 3 already on the list." in r.text
+    with SessionLocal() as db:
+        assert db.query(Attendee).filter_by(event_id=event_id).count() == 3
 
 
 # ----------------------------------------------------------------- PDF splitting
@@ -168,7 +173,7 @@ def test_pdf_page_count_mismatch_and_garbage_rejected(admin, event_id):
     admin.post(f"/events/{event_id}/attendees/import",
                files={"file": ("g.json", json.dumps(GUESTS).encode())})
     r = admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(4))})
-    assert r.status_code == 422 and "needs 5" in r.text
+    assert r.status_code == 422 and "needs 5" in r.text and "3 guests" in r.text and "per ticket" in r.text
     r = admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", b"%PDF-garbage")})
     assert r.status_code == 422
     with SessionLocal() as db:
