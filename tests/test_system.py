@@ -259,6 +259,9 @@ def test_claim_link_is_public_and_unguessable(admin, event_id):
     r = anon.get(f"/tickets/claim/{token}/download")
     assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
     assert "attachment" in r.headers["content-disposition"]
+    direct = anon.get(f"/tickets/claim/{token}/ticket.pdf")
+    assert direct.status_code == 200 and direct.content == r.content
+    assert direct.headers["content-disposition"].startswith("inline")
     assert len(PdfReader(io.BytesIO(r.content)).pages) == 1
     assert anon.get("/tickets/claim/" + "0" * 32).status_code == 404
     assert anon.get("/tickets/claim/" + "0" * 32 + "/download").status_code == 404
@@ -441,7 +444,7 @@ def test_qr_uses_reachable_base_url(admin, doorman, event_id, monkeypatch):
     ada = seeded_event(admin, event_id)
     monkeypatch.setattr(config, "PUBLIC_BASE_URL", "http://localhost:8000")
     r = doorman.get(f"/attendees/{ada}/qr", headers={"host": "192.168.1.20:8000"})
-    assert "http://192.168.1.20:8000/tickets/claim/" in r.text and "can't open" not in r.text
+    assert "http://192.168.1.20:8000/tickets/claim/" in r.text and "/ticket.pdf" in r.text and "can't open" not in r.text
     r = doorman.get(f"/attendees/{ada}/qr", headers={"host": "localhost:8000"})
     assert "can&#39;t open" in r.text or "can't open" in r.text
     monkeypatch.setattr(config, "PUBLIC_BASE_URL", "https://tickets.example.org")

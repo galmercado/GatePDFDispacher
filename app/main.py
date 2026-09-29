@@ -378,7 +378,7 @@ def qr_modal(attendee_id: int, request: Request, user: User = Depends(require_st
     unreachable = is_loopback(base)
     codes = []
     for ticket in attendee.tickets:
-        url = f"{base}/tickets/claim/{ticket.claim_token}"
+        url = f"{base}/tickets/claim/{ticket.claim_token}/ticket.pdf"
         qr = segno.make(url, error="m")
         codes.append({"page": ticket.page_number, "url": url,
                       "svg": qr.svg_data_uri(scale=8, border=2, dark="#0f172a", light="#ffffff")})
@@ -403,14 +403,25 @@ def claim_ticket(token: str, request: Request, db: Session = Depends(get_db)):
                                           "attendee": ticket.attendee})
 
 
-@app.get("/tickets/claim/{token}/download")
-def download_ticket(token: str, db: Session = Depends(get_db)):
+def ticket_pdf_response(db: Session, token: str, disposition: str) -> FileResponse:
     ticket = ticket_by_token(db, token)
     path = Path(ticket.file_path).resolve()
     if not path.is_relative_to(config.STORAGE_DIR.resolve()) or not path.is_file():
         raise HTTPException(404, "Ticket file is unavailable")
     return FileResponse(path, media_type="application/pdf", filename=f"ticket-{ticket.page_number}.pdf",
+                        content_disposition_type=disposition,
                         headers={"Cache-Control": "private, no-store"})
+
+
+@app.get("/tickets/claim/{token}/ticket.pdf")
+def open_ticket_pdf(token: str, db: Session = Depends(get_db)):
+    """Direct link to the PDF itself (what the QR code encodes); opens in the phone's viewer."""
+    return ticket_pdf_response(db, token, "inline")
+
+
+@app.get("/tickets/claim/{token}/download")
+def download_ticket(token: str, db: Session = Depends(get_db)):
+    return ticket_pdf_response(db, token, "attachment")
 
 
 # --------------------------------------------------------------------------- users & account

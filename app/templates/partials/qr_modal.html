@@ -1,7 +1,7 @@
 <div class="mb-3 flex items-start justify-between gap-3">
   <div class="min-w-0">
     <h2 class="truncate text-lg font-semibold text-white">{{ attendee.name }}</h2>
-    <p class="text-sm text-slate-400">Scan to open the ticket PDF</p>
+    <p class="text-sm text-slate-400">Scanning opens the ticket PDF directly</p>
   </div>
   <button onclick="document.getElementById('qr-modal').close()" class="text-slate-400 hover:text-white" aria-label="Close"><i class="ph ph-x text-xl"></i></button>
 </div>
@@ -15,7 +15,8 @@
 <div class="mb-3 rounded-2xl bg-white p-3 text-center">
   <img src="{{ c.svg }}" alt="QR code for ticket {{ c.page }}" class="mx-auto w-full max-w-[260px]">
   <p class="mt-1 text-xs font-medium text-slate-600">Ticket {{ loop.index }} of {{ codes|length }}</p>
-  <a href="{{ c.url }}" target="_blank" rel="noopener" class="mt-1 block break-all text-[11px] text-slate-500 underline">{{ c.url }}</a>
+  <a href="{{ c.url }}" target="_blank" rel="noopener" class="mt-2 inline-flex items-center gap-1 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white"><i class="ph ph-file-pdf"></i> Open PDF</a>
+  <p class="mt-1 break-all text-[11px] text-slate-500">{{ c.url }}</p>
 </div>
 {% else %}
 <div class="rounded-xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
