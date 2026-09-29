@@ -142,9 +142,10 @@ Open `https://tickets.your-domain`, sign in with Google (or `admin@event.local` 
 ### 7. Link WhatsApp on the server
 Evolution's port is bound to the server's localhost only. Reach it through an SSH tunnel from your laptop:
 ```bash
-ssh -L 8080:localhost:8080 ubuntu@YOUR_IP      # leave open; then use http://localhost:8080/manager on your laptop
+ssh -L 8081:localhost:8080 ubuntu@YOUR_IP      # leave open; then use http://localhost:8081/manager on your laptop
+# (8081, not 8080: a local Evolution container on your laptop would otherwise answer instead, with a different API key -> "Unauthorized")
 ```
-Run the *Configure the WhatsApp instance* commands from the server (or the manager UI through the tunnel) and scan the QR.
+Run the *Configure the WhatsApp instance* commands on the server itself (`cd ~/gate` first, so `.env` is the right one) (or the manager UI through the tunnel) and scan the QR.
 The session is stored in the `evolution_instances` + `postgres_data` volumes and survives restarts and updates.
 
 ### 8. Operate
