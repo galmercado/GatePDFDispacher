@@ -5,7 +5,7 @@ Runs on Docker Compose, locally or on an Oracle Cloud Always-Free ARM VM.
 
 ## What it does
 
-- **Events** (admin): opponent picker (`מכבי תל אביב נגד …`), arena picker (default *Home – Menora Mivtachim Arena*), calendar date/time.
+- **Events** (admin): opponent picker (`מכבי תל אביב נגד …`), arena picker (default *בית (היכל מנורה מבטחים)*), calendar date/time.
 - **Guests**: bulk import (`.xlsx` / `.json`) or add/edit/remove manually. Each guest has a **category**
   (חבר ארגון · מצטרף · פלוס · פתוח) and any mix of **מבוגר (adult)** and **נוער (youth)** tickets.
 - **Tickets**: upload one merged PDF; it is split per page and attached to guests in order (extra pages are allowed).

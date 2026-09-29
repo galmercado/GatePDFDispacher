@@ -217,7 +217,7 @@ def test_admin_can_create_event(admin):
     r = admin.post("/events", data={"opponent": "הפועל ירושלים", "event_date": "2031-06-01T18:30"})
     assert r.status_code == 303
     page = admin.get("/events").text
-    assert "מכבי תל אביב נגד הפועל ירושלים" in page and "Home (Menora Mivtachim Arena)" in page
+    assert "מכבי תל אביב נגד הפועל ירושלים" in page and __import__("app.data").data.DEFAULT_LOCATION in page
     r = admin.post("/events", data={"opponent": "__other__", "opponent_other": "צלגיריס",
                                     "location": "__other__", "location_other": "Kaunas Hall",
                                     "event_date": "2031-07-01T20:00"})

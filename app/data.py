@@ -1,7 +1,7 @@
 """Reference lists for the event scheduling form. Edit freely - one name per line.
 
 The teams and arenas are compiled from general knowledge (not fetched live), so review
-them once (team names are in Hebrew). Anything missing can be typed via the "Other" option in the form.
+them once (names are in Hebrew). Anything missing can be typed via the "Other" option in the form.
 """
 
 HOME_TEAM = "מכבי תל אביב"
@@ -11,46 +11,41 @@ VERSUS = "נגד"
 OPPONENTS = [
     "הפועל תל אביב",
     "הפועל ירושלים",
-    "הפועל חולון",
-    "הפועל באר שבע",
-    "הפועל חיפה",
-    "הפועל אילת",
-    "הפועל גלבוע גליל",
-    "הפועל גליל עליון",
-    "הפועל עפולה",
     "בני הרצליה",
-    "עירוני נס ציונה",
-    "עירוני קריית אתא",
+    "הפועל חולון",
+    "הפועל הגלבוע/העמק",
     "מכבי ראשון לציון",
-    "מכבי רעננה",
-    "מכבי חיפה",
+    "הפועל באר שבע/דימונה",
+    "מכבי רמת גן",
+    "עירוני קריית אתא",
+    "עירוני נס ציונה",
+    "הפועל גליל עליון",
+    "הפועל אילת",
+    "מכבי אשדוד"
 ]
 
-DEFAULT_LOCATION = "Home (Menora Mivtachim Arena)"
+DEFAULT_LOCATION = "בית (היכל מנורה מבטחים)"
 
 ARENAS = [
     DEFAULT_LOCATION,
-    "Drive in Arena (Tel Aviv)",
-    "Yad Eliyahu Arena (Tel Aviv)",
-    "Pais Arena (Jerusalem)",
-    "Toto Arena (Holon)",
-    "Be'er Sheva Arena",
-    "Romema Arena (Haifa)",
-    "Begin Sport Hall (Eilat)",
-    "Herzliya Arena",
-    "Ness Ziona Arena",
-    "Kiryat Ata Arena",
-    "Rishon LeZion Arena",
-    "Ra'anana Sports Hall",
-    "Galil Elyon Arena (Kiryat Shmona)",
-    "Gilboa Galil Arena",
-    "Enerbox Arena (Hadera)",
-    "Netanya Arena",
+    "פיס ארנה",
+    "היכל טוטו חולון",
+    "היכל קבוצת שלמה",
+    "היכל הקונכייה",
+    "אולם בגין",
+    "אולם לב המושבה",
+    "היכל זיסמן",
+    "אולם רמז",
+    "אולם פיס כפר בלום",
+    "גן נר",
+    "אולם היובל",
+    "אולם בית מכבי",
+    "היכל הקריה"
 ]
 
 OTHER = "__other__"
 OTHER_LABEL_OPPONENT = "אחר (הקלידו שם)…"
-OTHER_LABEL_LOCATION = "Other (type a venue)…"
+OTHER_LABEL_LOCATION = "אחר (הקלידו אולם)…"
 
 # Attendee categories (display order) and the ticket kinds an attendee can hold.
 CATEGORIES = ["חבר ארגון", "מצטרף", "פלוס", "פתוח"]
