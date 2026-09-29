@@ -3,6 +3,7 @@ import base64
 import io
 import asyncio
 import json
+import logging
 import random
 import re
 import shutil
@@ -19,6 +20,7 @@ from sqlalchemy.orm import Session
 from . import config
 from .models import Attendee, Ticket
 
+log = logging.getLogger("gate.whatsapp")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 COLUMN_ALIASES = {
@@ -285,6 +287,26 @@ class WhatsAppError(RuntimeError):
     pass
 
 
+def describe_gateway_error(resp: httpx.Response) -> str:
+    """Turn an Evolution API error body into a short, human-readable reason."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return resp.text.strip()[:160] or "no details"
+    inner = body.get("response", {}).get("message", body.get("message", body.get("error", "")))
+    items = inner if isinstance(inner, list) else [inner]
+    parts = []
+    for item in items:
+        if isinstance(item, dict) and item.get("exists") is False:
+            parts.append(f"{item.get('number', 'this number')} is not registered on WhatsApp "
+                         "(check the country code / local prefix)")
+        elif isinstance(item, dict):
+            parts.append(json.dumps(item)[:120])
+        elif item:
+            parts.append(str(item))
+    return "; ".join(parts)[:220] or "no details"
+
+
 class _SendThrottle:
     """Serialises sends and enforces a minimum gap since the previous send finished.
 
@@ -358,4 +380,6 @@ async def send_whatsapp_pdf(
         if owns_client:
             await client.aclose()
     if resp.status_code >= 400:
-        raise WhatsAppError(f"WhatsApp gateway rejected the message (HTTP {resp.status_code})")
+        detail = describe_gateway_error(resp)
+        log.warning("Evolution API HTTP %s for %s: %s", resp.status_code, payload["number"], resp.text[:500])
+        raise WhatsAppError(f"WhatsApp gateway rejected the message (HTTP {resp.status_code}): {detail}")

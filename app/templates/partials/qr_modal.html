@@ -5,10 +5,17 @@
   </div>
   <button onclick="document.getElementById('qr-modal').close()" class="text-slate-400 hover:text-white" aria-label="Close"><i class="ph ph-x text-xl"></i></button>
 </div>
+{% if unreachable and codes %}
+<div class="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200" role="alert">
+  <i class="ph-fill ph-warning"></i> This QR points to <b>localhost</b>, which other phones can't open.
+  Open this page from the server's LAN address (e.g. http://192.168.x.x:8000) or set <code>PUBLIC_BASE_URL</code>.
+</div>
+{% endif %}
 {% for c in codes %}
 <div class="mb-3 rounded-2xl bg-white p-3 text-center">
   <img src="{{ c.svg }}" alt="QR code for ticket {{ c.page }}" class="mx-auto w-full max-w-[260px]">
   <p class="mt-1 text-xs font-medium text-slate-600">Ticket {{ loop.index }} of {{ codes|length }}</p>
+  <a href="{{ c.url }}" target="_blank" rel="noopener" class="mt-1 block break-all text-[11px] text-slate-500 underline">{{ c.url }}</a>
 </div>
 {% else %}
 <div class="rounded-xl border border-dashed border-slate-700 p-6 text-center text-slate-400">

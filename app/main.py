@@ -1,5 +1,6 @@
 """FastAPI application: routes, templates and exception handlers."""
 import json
+from urllib.parse import urlsplit
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -357,18 +358,32 @@ async def whatsapp_dispatch(attendee_id: int, request: Request,
     return card_response(request, attendee, toast(f"Sent {n} ticket{'s' if n != 1 else ''} to {attendee.name}"))
 
 
+def is_loopback(url: str) -> bool:
+    return (urlsplit(url).hostname or "") in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def public_base_url(request: Request) -> str:
+    """Base URL for QR codes. A localhost PUBLIC_BASE_URL is useless to a phone, so it is
+    ignored in favour of the address the doorman's own browser is using."""
+    if config.PUBLIC_BASE_URL and not is_loopback(config.PUBLIC_BASE_URL):
+        return config.PUBLIC_BASE_URL
+    return str(request.base_url).rstrip("/")
+
+
 @app.get("/attendees/{attendee_id}/qr", response_class=HTMLResponse)
 def qr_modal(attendee_id: int, request: Request, user: User = Depends(require_staff),
              db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
-    base = config.PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
+    base = public_base_url(request)
+    unreachable = is_loopback(base)
     codes = []
     for ticket in attendee.tickets:
         url = f"{base}/tickets/claim/{ticket.claim_token}"
         qr = segno.make(url, error="m")
         codes.append({"page": ticket.page_number, "url": url,
                       "svg": qr.svg_data_uri(scale=8, border=2, dark="#0f172a", light="#ffffff")})
-    return render(request, "partials/qr_modal.html", {"attendee": attendee, "codes": codes})
+    return render(request, "partials/qr_modal.html", {"attendee": attendee, "codes": codes,
+                                                        "unreachable": unreachable})
 
 
 def ticket_by_token(db: Session, token: str) -> Ticket:

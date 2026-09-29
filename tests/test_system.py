@@ -435,3 +435,30 @@ def test_visiting_upload_urls_directly_redirects_to_manage(admin, doorman, event
         r = admin.get(f"/events/{event_id}/{path}")
         assert r.status_code == 303 and r.headers["location"] == f"/events/{event_id}/manage"
         assert doorman.get(f"/events/{event_id}/{path}").status_code == 403
+
+
+def test_qr_uses_reachable_base_url(admin, doorman, event_id, monkeypatch):
+    ada = seeded_event(admin, event_id)
+    monkeypatch.setattr(config, "PUBLIC_BASE_URL", "http://localhost:8000")
+    r = doorman.get(f"/attendees/{ada}/qr", headers={"host": "192.168.1.20:8000"})
+    assert "http://192.168.1.20:8000/tickets/claim/" in r.text and "can't open" not in r.text
+    r = doorman.get(f"/attendees/{ada}/qr", headers={"host": "localhost:8000"})
+    assert "can&#39;t open" in r.text or "can't open" in r.text
+    monkeypatch.setattr(config, "PUBLIC_BASE_URL", "https://tickets.example.org")
+    assert "https://tickets.example.org/tickets/claim/" in doorman.get(f"/attendees/{ada}/qr").text
+
+
+def test_gateway_error_details_are_surfaced(tmp_path):
+    pdf = tmp_path / "t.pdf"
+    pdf.write_bytes(make_pdf(1))
+    body = {"status": 400, "error": "Bad Request",
+            "response": {"message": [{"jid": "x@s.whatsapp.net", "exists": False, "number": "15550100001"}]}}
+    import asyncio
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda r: httpx.Response(400, json=body))) as c:
+            await services.send_whatsapp_pdf("15550100001", pdf, "hi", client=c)
+
+    with pytest.raises(services.WhatsAppError, match="not registered on WhatsApp"):
+        asyncio.run(go())
