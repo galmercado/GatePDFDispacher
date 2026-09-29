@@ -58,8 +58,12 @@ class Attendee(Base):
     phone: Mapped[str] = mapped_column(String(32), index=True)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     age: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Legacy column kept so databases created before categories existed keep working; unused.
     ticket_type: Mapped[str] = mapped_column(String(64), default="Standard")
-    ticket_count: Mapped[int] = mapped_column(Integer, default=1)
+    category: Mapped[str] = mapped_column(String(32), default="פתוח", index=True)
+    adult_count: Mapped[int] = mapped_column(Integer, default=1)   # מבוגר tickets
+    youth_count: Mapped[int] = mapped_column(Integer, default=0)   # נוער tickets
+    ticket_count: Mapped[int] = mapped_column(Integer, default=1)  # always adult_count + youth_count
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     checked_in: Mapped[bool] = mapped_column(Boolean, default=False)
     checked_in_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

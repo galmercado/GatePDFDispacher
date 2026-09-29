@@ -2,7 +2,7 @@
 from pathlib import Path
 from typing import Iterator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -47,7 +47,27 @@ def get_db() -> Iterator[Session]:
         db.close()
 
 
+def migrate(bind: Engine) -> None:
+    """Add columns introduced after the first release to pre-existing databases (SQLite)."""
+    insp = inspect(bind)
+    if "attendees" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("attendees")}
+    with bind.begin() as conn:
+        if "category" not in cols:
+            conn.execute(text("ALTER TABLE attendees ADD COLUMN category VARCHAR(32) NOT NULL DEFAULT 'פתוח'"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_attendees_category ON attendees (category)"))
+        counts_added = False
+        for col in ("adult_count", "youth_count"):
+            if col not in cols:
+                conn.execute(text(f"ALTER TABLE attendees ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"))
+                counts_added = True
+        if counts_added:  # every pre-existing ticket counts as an adult ticket
+            conn.execute(text("UPDATE attendees SET adult_count = ticket_count"))
+
+
 def init_db() -> None:
     from . import models  # noqa: F401  (register tables)
 
     Base.metadata.create_all(bind=engine)
+    migrate(engine)

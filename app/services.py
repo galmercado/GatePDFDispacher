@@ -12,12 +12,12 @@ from pathlib import Path
 
 import httpx
 import pandas as pd
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, ValidationError, field_validator, model_validator
 from pypdf import PdfReader, PdfWriter
 from pypdf.errors import PyPdfError
 from sqlalchemy.orm import Session
 
-from . import config
+from . import config, data
 from .models import Attendee, Ticket
 
 log = logging.getLogger("gate.whatsapp")
@@ -28,8 +28,11 @@ COLUMN_ALIASES = {
     "phone": {"phone", "phone number", "mobile", "whatsapp", "cell", "telefono", "teléfono"},
     "email": {"email", "e-mail", "email address", "correo"},
     "age": {"age", "edad"},
-    "ticket_type": {"ticket_type", "ticket type", "type", "tier", "tipo"},
-    "ticket_count": {"ticket_count", "ticket count", "tickets", "qty", "quantity", "count"},
+    "category": {"category", "attendee type", "type", "group", "סוג", "קטגוריה", "סוג משתתף"},
+    "adult_count": {"adult_count", "adult", "adults", "adult tickets", "מבוגר", "מבוגרים"},
+    "youth_count": {"youth_count", "youth", "youths", "youth tickets", "נוער"},
+    # legacy total: treated as adult tickets when no adult/youth columns are given
+    "ticket_count": {"ticket_count", "ticket count", "tickets", "qty", "quantity", "count", "כרטיסים"},
     "notes": {"notes", "note", "comments", "notas"},
 }
 
@@ -72,8 +75,10 @@ class AttendeeIn(BaseModel):
     phone: str
     email: str | None = None
     age: int | None = None
-    ticket_type: str = "Standard"
-    ticket_count: int = 1
+    category: str = data.DEFAULT_CATEGORY
+    adult_count: int = 0
+    youth_count: int = 0
+    ticket_count: int = 0  # derived; as input it is a legacy "total" meaning adult tickets
     notes: str | None = None
 
     @field_validator("name")
@@ -111,11 +116,8 @@ class AttendeeIn(BaseModel):
             raise ValueError("invalid email address")
         return v.lower() if v else v
 
-    @field_validator("age", "ticket_count", mode="before")
-    @classmethod
-    def _int_like(cls, v):
-        if v is None or (isinstance(v, str) and not v.strip()):
-            return None
+    @staticmethod
+    def _whole(v):
         try:
             f = float(v)
         except (TypeError, ValueError):
@@ -124,6 +126,11 @@ class AttendeeIn(BaseModel):
             raise ValueError("must be a whole number")
         return int(f)
 
+    @field_validator("age", mode="before")
+    @classmethod
+    def _age_int(cls, v):
+        return None if v is None or (isinstance(v, str) and not v.strip()) else cls._whole(v)
+
     @field_validator("age")
     @classmethod
     def _age(cls, v: int | None) -> int | None:
@@ -131,23 +138,38 @@ class AttendeeIn(BaseModel):
             raise ValueError("age must be between 0 and 120")
         return v
 
-    @field_validator("ticket_count", mode="before")
+    @field_validator("adult_count", "youth_count", "ticket_count", mode="before")
     @classmethod
-    def _count_default(cls, v):
-        return 1 if v is None or (isinstance(v, str) and not v.strip()) else v
+    def _count_int(cls, v):
+        return 0 if v is None or (isinstance(v, str) and not v.strip()) else cls._whole(v)
 
-    @field_validator("ticket_count")
+    @field_validator("adult_count", "youth_count", "ticket_count")
     @classmethod
-    def _count(cls, v: int) -> int:
-        if not 1 <= v <= 50:
-            raise ValueError("ticket_count must be between 1 and 50")
+    def _count_range(cls, v: int) -> int:
+        if not 0 <= v <= 50:
+            raise ValueError("ticket counts must be between 0 and 50")
         return v
 
-    @field_validator("ticket_type", mode="before")
+    @field_validator("category", mode="before")
     @classmethod
-    def _type(cls, v):
-        v = str(v).strip() if v is not None else ""
-        return v[:64] or "Standard"
+    def _category(cls, v):
+        v = " ".join(str(v).split()) if v is not None else ""
+        if not v:
+            return data.DEFAULT_CATEGORY
+        v = data.CATEGORY_ALIASES.get(v.lower(), v)
+        if v not in data.CATEGORIES:
+            raise ValueError("category must be one of: " + ", ".join(data.CATEGORIES))
+        return v
+
+    @model_validator(mode="after")
+    def _totals(self):
+        if not ({"adult_count", "youth_count"} & self.model_fields_set):
+            self.adult_count = self.ticket_count or 1
+        total = self.adult_count + self.youth_count
+        if not 1 <= total <= 50:
+            raise ValueError("an attendee needs 1-50 tickets in total (adult + youth)")
+        self.ticket_count = total
+        return self
 
 
 # --------------------------------------------------------------------------- import
@@ -204,6 +226,7 @@ def parse_guest_list(filename: str, content: bytes) -> list[AttendeeIn]:
     seen: set[tuple[str, str]] = set()
     for i, row in enumerate(rows):
         label = f"Row {i + offset}"
+        row = {k: v for k, v in row.items() if v is not None and str(v).strip() != ""}
         try:
             item = AttendeeIn.model_validate(row)
         except ValidationError as exc:

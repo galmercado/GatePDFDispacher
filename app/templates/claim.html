@@ -7,7 +7,7 @@
     <h1 dir="auto" class="text-xl font-semibold text-white">{{ event.name }}</h1>
     <p class="mt-1 text-sm text-slate-400">{{ event.event_date.strftime('%A %d %B %Y, %H:%M') }}{% if event.location %} · {{ event.location }}{% endif %}</p>
     <p class="mt-4 text-slate-300">{{ attendee.name }}</p>
-    <p class="text-xs text-slate-500">{{ attendee.ticket_type }} · ticket {{ ticket.page_number }}</p>
+    <p class="text-xs text-slate-500"><span dir="rtl">{{ attendee.category }}</span> · ticket {{ ticket.page_number }}</p>
     <a href="/tickets/claim/{{ ticket.claim_token }}/download"
        class="mt-6 flex items-center justify-center gap-2 rounded-xl bg-brand-500 py-3.5 font-semibold text-white hover:bg-brand-600">
       <i class="ph-bold ph-download-simple"></i> Download ticket (PDF)</a>

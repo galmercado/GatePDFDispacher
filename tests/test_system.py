@@ -33,7 +33,7 @@ def make_pdf(pages: int) -> bytes:
 
 
 GUESTS = [
-    {"name": "Ada Lovelace", "phone": "+1 (555) 010-0001", "ticket_count": 2, "ticket_type": "VIP"},
+    {"name": "Ada Lovelace", "phone": "+1 (555) 010-0001", "adult_count": 1, "youth_count": 1, "category": "חבר ארגון"},
     {"name": "Grace Hopper", "phone": "15550100002", "email": "Grace@Navy.mil", "age": 45},
     {"name": "Alan Turing", "phone": "15550100003", "ticket_count": 2, "notes": "Vegetarian"},
 ]
@@ -81,7 +81,8 @@ def test_parse_json_normalises_valid_rows():
     items = services.parse_guest_list("g.json", json.dumps({"attendees": GUESTS}).encode())
     assert [i.phone for i in items] == ["15550100001", "15550100002", "15550100003"]
     assert items[1].email == "grace@navy.mil" and items[1].ticket_count == 1
-    assert items[0].ticket_type == "VIP"
+    assert (items[0].category, items[0].adult_count, items[0].youth_count, items[0].ticket_count) == ("חבר ארגון", 1, 1, 2)
+    assert (items[2].adult_count, items[2].youth_count, items[2].category) == (2, 0, "פתוח")  # legacy ticket_count
 
 
 def test_parse_json_reports_every_bad_row():
@@ -89,7 +90,7 @@ def test_parse_json_reports_every_bad_row():
         {"name": "", "phone": "15550100001"},
         {"name": "B", "phone": "123"},
         {"name": "C", "phone": "15550100003", "age": 200},
-        {"name": "D", "phone": "15550100004", "ticket_count": 0},
+        {"name": "D", "phone": "15550100004", "adult_count": 0, "youth_count": 0},
         {"name": "E", "phone": "15550100005", "email": "nope"},
         {"name": "F", "phone": "15550100006"},
         {"name": "f", "phone": "15550100006"},
@@ -111,12 +112,12 @@ def test_parse_rejects_bad_files():
 
 def test_parse_xlsx_with_header_aliases():
     df = pd.DataFrame({"Full Name": ["Ada", "Grace"], "WhatsApp": ["15550100001", "15550100002"],
-                       "Tickets": [3, 1], "Tier": ["Sponsor", ""]})
+                       "מבוגר": [3, 1], "נוער": [1, None], "קטגוריה": ["פלוס", ""]})
     buf = io.BytesIO()
     df.to_excel(buf, index=False)
     items = services.parse_guest_list("list.xlsx", buf.getvalue())
-    assert [(i.name, i.ticket_count, i.ticket_type) for i in items] == [
-        ("Ada", 3, "Sponsor"), ("Grace", 1, "Standard")]
+    assert [(i.name, i.adult_count, i.youth_count, i.category) for i in items] == [
+        ("Ada", 3, 1, "פלוס"), ("Grace", 1, 0, "פתוח")]
 
 
 def test_parse_xlsx_missing_required_column():
@@ -216,7 +217,7 @@ def test_admin_can_create_event(admin):
     r = admin.post("/events", data={"opponent": "הפועל ירושלים", "event_date": "2031-06-01T18:30"})
     assert r.status_code == 303
     page = admin.get("/events").text
-    assert "מכבי תל אביב נגד הפועל ירושלים" in page and "בית (היכל מנורה מבטחים)" in page
+    assert "מכבי תל אביב נגד הפועל ירושלים" in page and "Home (Menora Mivtachim Arena)" in page
     r = admin.post("/events", data={"opponent": "__other__", "opponent_other": "צלגיריס",
                                     "location": "__other__", "location_other": "Kaunas Hall",
                                     "event_date": "2031-07-01T20:00"})
@@ -517,22 +518,26 @@ def test_whatsapp_and_qr_admit_the_guest(admin, doorman, event_id, monkeypatch):
 
 
 def test_manual_attendee_add_edit_delete(admin, doorman, event_id):
-    form = {"name": "Yael Cohen", "phone": "050-1234567", "ticket_count": "3", "ticket_type": "VIP",
-            "email": "", "age": "34", "notes": "Aisle seat"}
+    form = {"name": "Yael Cohen", "phone": "050-1234567", "adult_count": "2", "youth_count": "1",
+            "category": "פלוס", "email": "", "age": "34", "notes": "Aisle seat"}
     r = admin.post(f"/events/{event_id}/attendees", data=form)
     assert r.status_code == 200 and "Added Yael Cohen" in r.text
     with SessionLocal() as db:
         a = db.query(Attendee).filter_by(event_id=event_id, name="Yael Cohen").one()
-        assert a.phone == "972501234567" and a.ticket_count == 3 and a.age == 34 and a.email is None
+        assert a.phone == "972501234567" and (a.adult_count, a.youth_count, a.ticket_count) == (2, 1, 3)
+        assert a.age == 34 and a.email is None and a.category == "פלוס"
         aid = a.id
     assert admin.post(f"/events/{event_id}/attendees", data=form).status_code == 422   # duplicate
     assert admin.post(f"/events/{event_id}/attendees", data={**form, "name": "", "phone": "1"}).status_code == 422
 
-    r = admin.post(f"/attendees/{aid}/edit", data={**form, "name": "Yael Levi", "ticket_count": "2"})
+    r = admin.post(f"/attendees/{aid}/edit", data={**form, "name": "Yael Levi", "adult_count": "1", "youth_count": "1", "category": "מצטרף"})
     assert r.status_code == 200 and "Updated Yael Levi" in r.text
     assert admin.post(f"/attendees/{aid}/edit", data={**form, "age": "999"}).status_code == 422
+    assert admin.post(f"/attendees/{aid}/edit", data={**form, "adult_count": "0", "youth_count": "0"}).status_code == 422
+    assert admin.post(f"/attendees/{aid}/edit", data={**form, "category": "nope"}).status_code == 422
     with SessionLocal() as db:
         assert db.get(Attendee, aid).name == "Yael Levi" and db.get(Attendee, aid).ticket_count == 2
+        assert db.get(Attendee, aid).category == "מצטרף"
 
     for c in (doorman,):
         assert c.post(f"/events/{event_id}/attendees", data=form).status_code == 403
@@ -543,3 +548,49 @@ def test_manual_attendee_add_edit_delete(admin, doorman, event_id):
     assert r.status_code == 200 and "Removed Yael Levi" in r.text
     with SessionLocal() as db:
         assert db.get(Attendee, aid) is None
+
+
+def test_door_groups_and_counts_by_category(admin, doorman, event_id):
+    guests = [
+        {"name": "Member One", "phone": "0521111111", "category": "חבר ארגון", "adult_count": 2, "youth_count": 1},
+        {"name": "Joiner One", "phone": "0522222222", "category": "מצטרף", "adult_count": 1},
+        {"name": "Plus One", "phone": "0523333333", "category": "פלוס", "youth_count": 2},
+        {"name": "Open One", "phone": "0524444444", "category": "פתוח", "adult_count": 1, "youth_count": 1},
+        {"name": "Member Two", "phone": "0525555555", "category": "חבר ארגון", "adult_count": 1},
+    ]
+    r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(guests).encode())})
+    assert r.status_code == 200, r.text
+    page = doorman.get(f"/events/{event_id}/door").text
+    order = [page.index(f'aria-label="{c}"') for c in ("חבר ארגון", "מצטרף", "פלוס", "פתוח")]
+    assert order == sorted(order)                                   # four separate sections, in order
+    with SessionLocal() as db:
+        ids = {a.name: a.id for a in db.query(Attendee).filter_by(event_id=event_id)}
+    doorman.post(f"/attendees/{ids['Member One']}/toggle", headers={"HX-Request": "true"})   # 3 tickets
+    doorman.post(f"/attendees/{ids['Plus One']}/qr")                                          # 2 youth
+    from app.main import compute_stats
+    with SessionLocal() as db:
+        st = compute_stats(db, event_id)
+    assert (st["total"], st["admitted"], st["remaining"]) == (9, 5, 4)          # all types together
+    assert (st["adult_total"], st["adult_in"], st["youth_total"], st["youth_in"]) == (5, 2, 4, 3)
+    cats = {c["name"]: (c["admitted"], c["total"]) for c in st["categories"]}
+    assert cats == {"חבר ארגון": (3, 4), "מצטרף": (0, 1), "פלוס": (2, 2), "פתוח": (0, 2)}
+    assert 'id="stat-admitted">5<' in doorman.get(f"/events/{event_id}/stats").text
+    assert "<b" in doorman.get(f"/events/{event_id}/stats/category/0").text
+    assert doorman.get(f"/events/{event_id}/stats/category/9").status_code == 404
+    r = doorman.get(f"/events/{event_id}/search", params={"q": "plus"})
+    assert 'aria-label="פלוס"' in r.text and 'aria-label="חבר ארגון"' not in r.text
+
+
+def test_migration_adds_category_and_ticket_kind_columns(tmp_path):
+    from sqlalchemy import create_engine, text
+    from app.database import migrate
+    eng = create_engine(f"sqlite:///{tmp_path}/old.db")
+    with eng.begin() as c:
+        c.execute(text("CREATE TABLE attendees (id INTEGER PRIMARY KEY, event_id INTEGER, name TEXT, phone TEXT, "
+                       "ticket_type TEXT NOT NULL, ticket_count INTEGER NOT NULL, checked_in BOOLEAN)"))
+        c.execute(text("INSERT INTO attendees VALUES (1, 1, 'Old Guest', '972521', 'VIP', 3, 0)"))
+    migrate(eng)
+    migrate(eng)  # idempotent
+    with eng.begin() as c:
+        row = c.execute(text("SELECT category, adult_count, youth_count, ticket_count FROM attendees")).one()
+    assert tuple(row) == ("פתוח", 3, 0, 3)

@@ -1,0 +1,17 @@
+{# Door list, one section per attendee category with its own live admitted/total counter #}
+{% set tone = {'חבר ארגון': 'text-sky-300', 'מצטרף': 'text-violet-300', 'פלוס': 'text-amber-300', 'פתוח': 'text-slate-300'} %}
+{% for cat, items in groups %}
+<section class="mb-6" aria-label="{{ cat }}">
+  <div class="mb-2 flex items-baseline justify-between border-b border-slate-800 px-1 pb-1.5">
+    <h2 dir="rtl" class="text-base font-bold {{ tone[cat] }}">{{ cat }} <span class="text-xs font-normal text-slate-500">({{ items|length }})</span></h2>
+    <span class="text-xs text-slate-300" hx-get="/events/{{ event_id }}/stats/category/{{ categories.index(cat) }}"
+          hx-trigger="refreshStats from:body" hx-swap="innerHTML">{% with c = counts[cat] %}{% include "partials/category_count.html" %}{% endwith %}</span>
+  </div>
+  <div class="space-y-3">{% with attendees = items %}{% include "partials/attendee_rows.html" %}{% endwith %}</div>
+</section>
+{% else %}
+<div class="rounded-2xl border border-dashed border-slate-700 p-10 text-center text-slate-400">
+  <i class="ph ph-user-focus text-4xl"></i>
+  <p class="mt-2">{% if q %}No guests match “{{ q }}”.{% else %}No guests yet.{% endif %}</p>
+</div>
+{% endfor %}

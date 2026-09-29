@@ -94,17 +94,34 @@ def get_attendee_or_404(db: Session, attendee_id: int) -> Attendee:
 
 
 def compute_stats(db: Session, event_id: int) -> dict:
-    total, admitted, guests, guests_in = db.query(
-        func.coalesce(func.sum(Attendee.ticket_count), 0),
-        func.coalesce(func.sum(Attendee.ticket_count).filter(Attendee.checked_in.is_(True)), 0),
-        func.count(Attendee.id),
+    """Ticket counts (not guests): overall, per category and per ticket kind (adult/youth)."""
+    def paid(col, admitted_only=False):
+        expr = func.sum(col).filter(Attendee.checked_in.is_(True)) if admitted_only else func.sum(col)
+        return func.coalesce(expr, 0)
+
+    rows = db.query(
+        Attendee.category, func.count(Attendee.id),
         func.count(Attendee.id).filter(Attendee.checked_in.is_(True)),
-    ).filter(Attendee.event_id == event_id).one()
-    return {
-        "total": total, "admitted": admitted, "remaining": total - admitted,
-        "guests": guests, "guests_in": guests_in,
-        "percent": round(admitted * 100 / total) if total else 0,
-    }
+        paid(Attendee.ticket_count), paid(Attendee.ticket_count, True),
+        paid(Attendee.adult_count), paid(Attendee.adult_count, True),
+        paid(Attendee.youth_count), paid(Attendee.youth_count, True),
+    ).filter(Attendee.event_id == event_id).group_by(Attendee.category).all()
+    keys = ("guests", "guests_in", "total", "admitted", "adult_total", "adult_in", "youth_total", "youth_in")
+    by_cat = {r[0]: dict(zip(keys, r[1:])) for r in rows}
+    blank = dict.fromkeys(keys, 0)
+    categories = [{"name": c, **by_cat.get(c, blank)} for c in data.CATEGORIES]
+    overall = {k: sum(c[k] for c in categories) for k in keys}
+    overall.update(
+        remaining=overall["total"] - overall["admitted"],
+        percent=round(overall["admitted"] * 100 / overall["total"]) if overall["total"] else 0,
+        categories=categories,
+    )
+    return overall
+
+
+def group_by_category(attendees: list[Attendee]) -> list[tuple[str, list[Attendee]]]:
+    return [(c, [a for a in attendees if a.category == c]) for c in data.CATEGORIES
+            if any(a.category == c for a in attendees)]
 
 
 def toast(message: str, kind: str = "success") -> dict:
@@ -253,7 +270,8 @@ def manage_ctx(db: Session, user: User, event: Event, **extra) -> dict:
     attendees = (db.query(Attendee).options(selectinload(Attendee.tickets))
                  .filter(Attendee.event_id == event.id).order_by(func.lower(Attendee.name), Attendee.id).all())
     return {"user": user, "event": event, "stats": compute_stats(db, event.id),
-            "ticket_files": tickets, "attendees": attendees, "messages": [], "errors": [], **extra}
+            "ticket_files": tickets, "attendees": attendees, "groups": group_by_category(attendees),
+            "categories": data.CATEGORIES, "messages": [], "errors": [], **extra}
 
 
 @app.get("/events/{event_id}/manage", response_class=HTMLResponse)
@@ -315,8 +333,8 @@ def validate_attendee_form(**fields) -> tuple[AttendeeIn | None, list[str]]:
     try:
         return AttendeeIn.model_validate(fields), []
     except ValidationError as exc:
-        return None, [f"{'.'.join(str(p) for p in e['loc'])}: {e['msg'].removeprefix('Value error, ')}"
-                      for e in exc.errors()]
+        return None, [(f"{'.'.join(str(p) for p in e['loc'])}: " if e["loc"] else "")
+                      + e["msg"].removeprefix("Value error, ") for e in exc.errors()]
 
 
 def is_duplicate(db: Session, event_id: int, item: AttendeeIn, exclude_id: int | None = None) -> bool:
@@ -331,12 +349,13 @@ def is_duplicate(db: Session, event_id: int, item: AttendeeIn, exclude_id: int |
 def add_attendee(
     event_id: int, request: Request,
     name: str = Form(""), phone: str = Form(""), email: str = Form(""), age: str = Form(""),
-    ticket_type: str = Form("Standard"), ticket_count: str = Form("1"), notes: str = Form(""),
+    category: str = Form(data.DEFAULT_CATEGORY), adult_count: str = Form("1"), youth_count: str = Form("0"),
+    notes: str = Form(""),
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     event = get_event_or_404(db, event_id)
-    item, errors = validate_attendee_form(name=name, phone=phone, email=email, age=age,
-                                          ticket_type=ticket_type, ticket_count=ticket_count, notes=notes)
+    item, errors = validate_attendee_form(name=name, phone=phone, email=email, age=age, category=category,
+                                          adult_count=adult_count, youth_count=youth_count, notes=notes)
     if item and is_duplicate(db, event.id, item):
         errors = [f"{item.name} ({item.phone}) is already on the list."]
     if errors:
@@ -353,13 +372,14 @@ def add_attendee(
 def edit_attendee(
     attendee_id: int, request: Request,
     name: str = Form(""), phone: str = Form(""), email: str = Form(""), age: str = Form(""),
-    ticket_type: str = Form("Standard"), ticket_count: str = Form("1"), notes: str = Form(""),
+    category: str = Form(data.DEFAULT_CATEGORY), adult_count: str = Form("1"), youth_count: str = Form("0"),
+    notes: str = Form(""),
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     attendee = get_attendee_or_404(db, attendee_id)
     event = get_event_or_404(db, attendee.event_id)
-    item, errors = validate_attendee_form(name=name, phone=phone, email=email, age=age,
-                                          ticket_type=ticket_type, ticket_count=ticket_count, notes=notes)
+    item, errors = validate_attendee_form(name=name, phone=phone, email=email, age=age, category=category,
+                                          adult_count=adult_count, youth_count=youth_count, notes=notes)
     if item and is_duplicate(db, event.id, item, exclude_id=attendee.id):
         errors = [f"Another guest named {item.name} already has {item.phone}."]
     if errors:
@@ -392,10 +412,11 @@ def delete_attendee(attendee_id: int, request: Request, user: User = Depends(req
 def door_page(event_id: int, request: Request, user: User = Depends(require_staff),
               db: Session = Depends(get_db)):
     event = get_event_or_404(db, event_id)
-    attendees = search_attendees(db, event.id, "")
+    stats = compute_stats(db, event.id)
     return render(request, "doorman.html", {
-        "user": user, "event": event, "attendees": attendees, "q": "",
-        "stats": compute_stats(db, event.id),
+        "user": user, "event": event, "stats": stats, "q": "", "event_id": event.id, "categories": data.CATEGORIES,
+        "groups": group_by_category(search_attendees(db, event.id, "")),
+        "counts": {c["name"]: c for c in stats["categories"]},
     })
 
 
@@ -420,8 +441,20 @@ def search_attendees(db: Session, event_id: int, q: str, limit: int = 300) -> li
 def search(event_id: int, request: Request, q: str = "", user: User = Depends(require_staff),
            db: Session = Depends(get_db)):
     get_event_or_404(db, event_id)
-    return render(request, "partials/attendee_rows.html",
-                  {"attendees": search_attendees(db, event_id, q), "q": q.strip()})
+    stats = compute_stats(db, event_id)
+    return render(request, "partials/attendee_groups.html", {
+        "groups": group_by_category(search_attendees(db, event_id, q)), "q": q.strip(),
+        "event_id": event_id, "categories": data.CATEGORIES, "counts": {c["name"]: c for c in stats["categories"]}})
+
+
+@app.get("/events/{event_id}/stats/category/{index}", response_class=HTMLResponse)
+def category_count(event_id: int, index: int, request: Request, user: User = Depends(require_staff),
+                   db: Session = Depends(get_db)):
+    if not 0 <= index < len(data.CATEGORIES):
+        raise HTTPException(404, "Unknown category")
+    get_event_or_404(db, event_id)
+    c = compute_stats(db, event_id)["categories"][index]
+    return render(request, "partials/category_count.html", {"c": c})
 
 
 @app.get("/events/{event_id}/stats", response_class=HTMLResponse)

@@ -19,7 +19,7 @@
 <section class="mb-4 rounded-2xl border border-slate-800 bg-slate-900 p-5">
   <h2 class="mb-1 flex items-center gap-2 font-semibold text-white"><i class="ph ph-users-three text-brand-400"></i> 1. Import guest list</h2>
   <p class="mb-3 text-sm text-slate-400">.xlsx or .json. Columns: <code class="text-slate-300">name, phone</code> (required),
-    <code class="text-slate-300">email, age, ticket_type, ticket_count, notes</code>. Any invalid row rejects the whole file.</p>
+    <code class="text-slate-300">category</code> (חבר ארגון / מצטרף / פלוס / פתוח; default פתוח), <code class="text-slate-300">adult</code> / <code class="text-slate-300">מבוגר</code> and <code class="text-slate-300">youth</code> / <code class="text-slate-300">נוער</code> ticket counts (a legacy <code class="text-slate-300">tickets</code> column counts as adults), <code class="text-slate-300">email, age, notes</code>. Any invalid row rejects the whole file.</p>
   <form method="post" action="/events/{{ event.id }}/attendees/import" enctype="multipart/form-data" class="flex flex-col gap-3 sm:flex-row">
     <input type="file" name="file" accept=".xlsx,.json" required
            class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-3 file:text-slate-200">
@@ -40,7 +40,6 @@
 
 {% set field = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-500/30" %}
 {% set label = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" %}
-<datalist id="ticket-types"><option value="Standard"><option value="VIP"><option value="Sponsor"></datalist>
 
 <section class="mt-5 rounded-2xl border border-slate-800 bg-slate-900 p-5">
   <h2 class="mb-3 flex items-center gap-2 font-semibold text-white"><i class="ph ph-user-plus text-brand-400"></i> Add a guest manually</h2>
@@ -48,10 +47,12 @@
     <div><label class="{{ label }}" for="a-name">Name</label><input id="a-name" name="name" required maxlength="255" class="{{ field }}"></div>
     <div><label class="{{ label }}" for="a-phone">Phone</label><input id="a-phone" name="phone" type="tel" required inputmode="tel" placeholder="052-5607772" class="{{ field }}"></div>
     <div><label class="{{ label }}" for="a-email">Email</label><input id="a-email" name="email" type="email" class="{{ field }}"></div>
-    <div class="grid grid-cols-3 gap-3">
-      <div><label class="{{ label }}" for="a-age">Age</label><input id="a-age" name="age" type="number" min="0" max="120" class="{{ field }}"></div>
-      <div><label class="{{ label }}" for="a-count">Tickets</label><input id="a-count" name="ticket_count" type="number" min="1" max="50" value="1" required class="{{ field }}"></div>
-      <div><label class="{{ label }}" for="a-type">Type</label><input id="a-type" name="ticket_type" list="ticket-types" value="Standard" class="{{ field }}"></div>
+    <div><label class="{{ label }}" for="a-age">Age</label><input id="a-age" name="age" type="number" min="0" max="120" class="{{ field }}"></div>
+    <div><label class="{{ label }}" for="a-cat">Category</label>
+      <select id="a-cat" name="category" dir="rtl" class="{{ field }}">{% for c in categories %}<option value="{{ c }}" {{ 'selected' if loop.last }}>{{ c }}</option>{% endfor %}</select></div>
+    <div class="grid grid-cols-2 gap-3">
+      <div><label class="{{ label }}" for="a-adult">מבוגר (adult)</label><input id="a-adult" name="adult_count" type="number" min="0" max="50" value="1" required class="{{ field }}"></div>
+      <div><label class="{{ label }}" for="a-youth">נוער (youth)</label><input id="a-youth" name="youth_count" type="number" min="0" max="50" value="0" required class="{{ field }}"></div>
     </div>
     <div class="sm:col-span-2"><label class="{{ label }}" for="a-notes">Notes</label><input id="a-notes" name="notes" class="{{ field }}"></div>
     <button class="flex items-center justify-center gap-2 rounded-xl bg-brand-500 py-3 font-semibold text-white hover:bg-brand-600 sm:col-span-2"><i class="ph-bold ph-plus"></i> Add guest</button>
@@ -63,21 +64,26 @@
     <h2 class="font-semibold text-white">Guests ({{ attendees|length }})</h2>
     <input type="search" id="guest-filter" placeholder="Filter…" class="w-40 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white outline-none focus:border-brand-400">
   </div>
-  <div id="guest-list" class="space-y-2">
-  {% for a in attendees %}
+  <div id="guest-list">
+  {% for cat, items in groups %}
+  <h3 dir="rtl" class="mb-2 mt-4 border-b border-slate-800 pb-1 text-sm font-bold text-slate-300">{{ cat }} <span class="font-normal text-slate-500">({{ items|length }} · {{ items|sum(attribute='ticket_count') }} tickets)</span></h3>
+  <div class="space-y-2">
+  {% for a in items %}
   <details class="rounded-2xl border border-slate-800 bg-slate-900" data-search="{{ (a.name ~ ' ' ~ a.phone)|lower }}">
     <summary class="flex cursor-pointer list-none items-center justify-between gap-3 p-3">
-      <div class="min-w-0"><p class="truncate font-medium text-white">{{ a.name }}</p><p class="text-xs text-slate-400">+{{ a.phone }} · {{ a.ticket_type }} · {{ a.ticket_count }} ticket(s){% if not a.tickets %} · <span class="text-rose-300">no PDF</span>{% endif %}</p></div>
+      <div class="min-w-0"><p class="truncate font-medium text-white">{{ a.name }}</p><p class="text-xs text-slate-400">+{{ a.phone }} · <span dir="rtl">מבוגר {{ a.adult_count }} · נוער {{ a.youth_count }}</span>{% if not a.tickets %} · <span class="text-rose-300">no PDF</span>{% endif %}</p></div>
       <i class="ph ph-pencil-simple text-slate-500"></i>
     </summary>
     <form method="post" action="/attendees/{{ a.id }}/edit" class="grid gap-3 border-t border-slate-800 p-4 sm:grid-cols-2">
       <div><label class="{{ label }}">Name</label><input name="name" value="{{ a.name }}" required class="{{ field }}"></div>
       <div><label class="{{ label }}">Phone</label><input name="phone" value="{{ a.phone }}" required inputmode="tel" class="{{ field }}"></div>
       <div><label class="{{ label }}">Email</label><input name="email" type="email" value="{{ a.email or '' }}" class="{{ field }}"></div>
-      <div class="grid grid-cols-3 gap-3">
-        <div><label class="{{ label }}">Age</label><input name="age" type="number" min="0" max="120" value="{{ a.age if a.age is not none else '' }}" class="{{ field }}"></div>
-        <div><label class="{{ label }}">Tickets</label><input name="ticket_count" type="number" min="1" max="50" value="{{ a.ticket_count }}" required class="{{ field }}"></div>
-        <div><label class="{{ label }}">Type</label><input name="ticket_type" list="ticket-types" value="{{ a.ticket_type }}" class="{{ field }}"></div>
+      <div><label class="{{ label }}">Age</label><input name="age" type="number" min="0" max="120" value="{{ a.age if a.age is not none else '' }}" class="{{ field }}"></div>
+      <div><label class="{{ label }}">Category</label>
+        <select name="category" dir="rtl" class="{{ field }}">{% for c in categories %}<option value="{{ c }}" {{ 'selected' if a.category == c }}>{{ c }}</option>{% endfor %}</select></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="{{ label }}">מבוגר (adult)</label><input name="adult_count" type="number" min="0" max="50" value="{{ a.adult_count }}" required class="{{ field }}"></div>
+        <div><label class="{{ label }}">נוער (youth)</label><input name="youth_count" type="number" min="0" max="50" value="{{ a.youth_count }}" required class="{{ field }}"></div>
       </div>
       <div class="sm:col-span-2"><label class="{{ label }}">Notes</label><input name="notes" value="{{ a.notes or '' }}" class="{{ field }}"></div>
       <button class="flex items-center justify-center gap-2 rounded-xl bg-slate-800 py-2.5 font-semibold text-slate-100 hover:bg-slate-700"><i class="ph-bold ph-floppy-disk"></i> Save</button>
@@ -88,11 +94,15 @@
   </details>
   {% endfor %}
   </div>
+  {% else %}
+  <p class="text-sm text-slate-500">No guests yet.</p>
+  {% endfor %}
+  </div>
 </section>
 <script>
   document.getElementById('guest-filter').addEventListener('input', (e) => {
     const q = e.target.value.trim().toLowerCase();
-    document.querySelectorAll('#guest-list > details').forEach((d) => { d.hidden = q && !d.dataset.search.includes(q); });
+    document.querySelectorAll('#guest-list details').forEach((d) => { d.hidden = q && !d.dataset.search.includes(q); });
   });
 </script>
 
