@@ -254,10 +254,14 @@ def test_claim_link_is_public_and_unguessable(admin, event_id):
     with SessionLocal() as db:
         token = db.get(Attendee, ada).tickets[0].claim_token
     anon = TestClient(app)
-    r = anon.get(f"/tickets/claim/{token}")
+    page = anon.get(f"/tickets/claim/{token}")
+    assert page.status_code == 200 and f"/tickets/claim/{token}/download" in page.text
+    r = anon.get(f"/tickets/claim/{token}/download")
     assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
+    assert "attachment" in r.headers["content-disposition"]
     assert len(PdfReader(io.BytesIO(r.content)).pages) == 1
     assert anon.get("/tickets/claim/" + "0" * 32).status_code == 404
+    assert anon.get("/tickets/claim/" + "0" * 32 + "/download").status_code == 404
 
 
 def test_login_logout_and_cookie_flags(client):
@@ -326,3 +330,66 @@ def test_whatsapp_endpoint_success_and_failure(admin, doorman, event_id, monkeyp
     monkeypatch.setattr("app.main.send_whatsapp_pdf", boom)
     r = doorman.post(f"/attendees/{ada}/whatsapp")
     assert r.status_code == 200 and "gateway down" in r.headers["HX-Trigger"]
+
+
+def test_extra_pdf_pages_are_allowed(admin, event_id):
+    admin.post(f"/events/{event_id}/attendees/import",
+               files={"file": ("g.json", json.dumps(GUESTS).encode())})
+    r = admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(8))})
+    assert r.status_code == 200 and "attached 5 ticket(s)" in r.text and "3 extra page(s)" in r.text
+    assert len(list((config.STORAGE_DIR / "tickets" / str(event_id)).glob("*.pdf"))) == 8
+    with SessionLocal() as db:
+        assert db.query(Ticket).filter_by(event_id=event_id).count() == 5
+
+
+# ----------------------------------------------------------------- user management
+
+def test_users_page_is_admin_only(admin, doorman):
+    assert admin.get("/users").status_code == 200
+    assert doorman.get("/users").status_code == 403
+    assert doorman.post("/users", data={"email": "x@y.zz", "full_name": "X", "password": "password1",
+                                        "role": "admin"}).status_code == 403
+    assert TestClient(app, follow_redirects=False).get("/users").status_code == 303
+
+
+def test_admin_creates_edits_and_deactivates_user(admin):
+    r = admin.post("/users", data={"email": "New@Event.local", "full_name": "New Door",
+                                   "password": "password1", "role": "doorman"})
+    assert r.status_code == 200 and "Created new@event.local" in r.text
+    assert admin.post("/users", data={"email": "new@event.local", "full_name": "Dup",
+                                      "password": "password1", "role": "doorman"}).status_code == 422
+    assert admin.post("/users", data={"email": "s@event.local", "full_name": "S",
+                                      "password": "short", "role": "doorman"}).status_code == 422
+    login("new@event.local", "password1")
+    with SessionLocal() as db:
+        uid = db.query(User).filter_by(email="new@event.local").one().id
+    r = admin.post(f"/users/{uid}", data={"full_name": "Renamed", "role": "admin",
+                                          "is_active": "on", "new_password": "newpass99"})
+    assert r.status_code == 200 and "Renamed" in r.text
+    promoted = login("new@event.local", "newpass99")
+    assert promoted.get("/users").status_code == 200
+    admin.post(f"/users/{uid}", data={"full_name": "Renamed", "role": "admin"})  # inactive
+    assert promoted.get("/events").status_code == 303  # existing session revoked
+    assert TestClient(app).post("/login", data={"email": "new@event.local",
+                                                "password": "newpass99"}).status_code == 401
+
+
+def test_admin_cannot_lock_themselves_out(admin):
+    with SessionLocal() as db:
+        me = db.query(User).filter_by(email="admin@event.local").one().id
+    for data in ({"full_name": "A", "role": "doorman", "is_active": "on"},
+                 {"full_name": "A", "role": "admin"}):
+        assert admin.post(f"/users/{me}", data=data).status_code == 422
+    assert admin.get("/users").status_code == 200
+
+
+def test_change_own_password(client):
+    with SessionLocal() as db:
+        db.add(User(email="pw@event.local", hashed_password=hash_password("oldpass11"),
+                    full_name="Pw", role=Role.doorman))
+        db.commit()
+    c = login("pw@event.local", "oldpass11")
+    assert c.post("/account/password", data={"current_password": "bad", "new_password": "newpass22"}).status_code == 422
+    assert c.post("/account/password", data={"current_password": "oldpass11", "new_password": "x"}).status_code == 422
+    assert c.post("/account/password", data={"current_password": "oldpass11", "new_password": "newpass22"}).status_code == 200
+    login("pw@event.local", "newpass22")

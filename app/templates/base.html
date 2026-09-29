@@ -41,6 +41,8 @@
       <div class="flex items-center gap-3 text-sm">
         <span class="hidden text-slate-400 sm:inline">{{ user.full_name }}
           <span class="ml-1 rounded-full bg-slate-800 px-2 py-0.5 text-xs uppercase tracking-wide text-slate-300">{{ user.role.value }}</span></span>
+        {% if user.role.value == 'admin' %}<a href="/users" class="text-slate-300 hover:text-white" aria-label="Users"><i class="ph ph-users text-lg"></i></a>{% endif %}
+        <a href="/account" class="text-slate-300 hover:text-white" aria-label="Account"><i class="ph ph-user-gear text-lg"></i></a>
         <form method="post" action="/logout">
           <button class="flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800" aria-label="Sign out">
             <i class="ph ph-sign-out"></i><span>Sign out</span>

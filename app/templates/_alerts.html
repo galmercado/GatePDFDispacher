@@ -1,0 +1,2 @@
+{% for m in messages %}<div class="mb-4 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200" role="status"><i class="ph-fill ph-check-circle"></i> {{ m }}</div>{% endfor %}
+{% if errors %}<div class="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert"><ul class="list-inside list-disc">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}

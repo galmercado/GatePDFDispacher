@@ -235,11 +235,12 @@ def split_pdf(content: bytes, event_id: int) -> list[Path]:
     return paths
 
 
-def map_pdf_to_attendees(db: Session, event_id: int, content: bytes) -> int:
+def map_pdf_to_attendees(db: Session, event_id: int, content: bytes) -> tuple[int, int]:
     """Split `content` and attach pages sequentially to attendees (by id) per ticket_count.
 
-    The page count must equal the total ticket_count, so misaligned PDFs never
-    silently hand someone else's ticket to a guest. Returns the number of tickets.
+    The PDF may contain more pages than needed (spare tickets stay unassigned on disk),
+    but never fewer, so no guest is left without a ticket.
+    Returns (tickets_attached, spare_pages).
     """
     attendees = (
         db.query(Attendee).filter(Attendee.event_id == event_id).order_by(Attendee.id).all()
@@ -252,9 +253,9 @@ def map_pdf_to_attendees(db: Session, event_id: int, content: bytes) -> int:
         page_count = len(PdfReader(io.BytesIO(content)).pages)
     except Exception as exc:
         raise PdfProcessingError(f"Not a valid PDF: {exc}")
-    if page_count != needed:
+    if page_count < needed:
         raise PdfProcessingError(
-            f"The PDF has {page_count} page(s) but the guest list needs {needed} ticket(s)"
+            f"The PDF has only {page_count} page(s) but the guest list needs {needed} ticket(s)"
         )
 
     paths = split_pdf(content, event_id)
@@ -272,7 +273,7 @@ def map_pdf_to_attendees(db: Session, event_id: int, content: bytes) -> int:
             )
             page += 1
     db.commit()
-    return page
+    return page, len(paths) - page
 
 
 # --------------------------------------------------------------------------- WhatsApp

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+{% block content %}
+{% set field = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-500/30" %}
+{% set label = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" %}
+<a href="/events" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-400 hover:text-white"><i class="ph ph-arrow-left"></i> Events</a>
+<h1 class="mb-4 text-2xl font-bold text-white">Users</h1>
+{% include "_alerts.html" %}
+
+<section class="mb-5 rounded-2xl border border-slate-800 bg-slate-900 p-5">
+  <h2 class="mb-3 flex items-center gap-2 font-semibold text-white"><i class="ph ph-user-plus text-brand-400"></i> Add user</h2>
+  <form method="post" action="/users" class="grid gap-3 sm:grid-cols-2">
+    <div><label class="{{ label }}" for="n-name">Full name</label><input id="n-name" name="full_name" required class="{{ field }}"></div>
+    <div><label class="{{ label }}" for="n-email">Email</label><input id="n-email" name="email" type="email" required autocomplete="off" class="{{ field }}"></div>
+    <div><label class="{{ label }}" for="n-pass">Password (min 8)</label><input id="n-pass" name="password" type="password" minlength="8" required autocomplete="new-password" class="{{ field }}"></div>
+    <div><label class="{{ label }}" for="n-role">Role</label>
+      <select id="n-role" name="role" class="{{ field }}">{% for r in roles %}<option value="{{ r.value }}">{{ r.value|capitalize }}</option>{% endfor %}</select></div>
+    <button class="flex items-center justify-center gap-2 rounded-xl bg-brand-500 py-3 font-semibold text-white hover:bg-brand-600 sm:col-span-2"><i class="ph-bold ph-plus"></i> Create user</button>
+  </form>
+</section>
+
+<div class="space-y-3">
+{% for u in users %}
+<details class="rounded-2xl border border-slate-800 bg-slate-900">
+  <summary class="flex cursor-pointer list-none items-center justify-between gap-3 p-4">
+    <div class="min-w-0"><p class="truncate font-semibold text-white">{{ u.full_name }}{% if u.id == user.id %} <span class="text-xs text-slate-500">(you)</span>{% endif %}</p>
+      <p class="truncate text-sm text-slate-400">{{ u.email }}</p></div>
+    <div class="flex shrink-0 items-center gap-2 text-xs">
+      <span class="rounded-full bg-slate-800 px-2 py-0.5 uppercase tracking-wide text-slate-300">{{ u.role.value }}</span>
+      {% if not u.is_active %}<span class="rounded-full bg-rose-500/15 px-2 py-0.5 text-rose-300">Inactive</span>{% endif %}
+      <i class="ph ph-caret-down text-slate-500"></i></div>
+  </summary>
+  <form method="post" action="/users/{{ u.id }}" class="grid gap-3 border-t border-slate-800 p-4 sm:grid-cols-2">
+    <div><label class="{{ label }}">Full name</label><input name="full_name" value="{{ u.full_name }}" required class="{{ field }}"></div>
+    <div><label class="{{ label }}">Role</label>
+      <select name="role" class="{{ field }}">{% for r in roles %}<option value="{{ r.value }}" {{ 'selected' if u.role == r }}>{{ r.value|capitalize }}</option>{% endfor %}</select></div>
+    <div><label class="{{ label }}">New password (optional)</label><input name="new_password" type="password" minlength="8" autocomplete="new-password" class="{{ field }}" placeholder="Leave blank to keep"></div>
+    <label class="flex items-center gap-2 self-end pb-2.5 text-sm text-slate-300"><input type="checkbox" name="is_active" {{ 'checked' if u.is_active }} class="h-5 w-5 rounded"> Active</label>
+    <button class="flex items-center justify-center gap-2 rounded-xl bg-slate-800 py-2.5 font-semibold text-slate-100 hover:bg-slate-700 sm:col-span-2"><i class="ph-bold ph-floppy-disk"></i> Save changes</button>
+  </form>
+</details>
+{% endfor %}
+</div>
+{% endblock %}

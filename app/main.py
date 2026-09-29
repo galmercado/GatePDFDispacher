@@ -16,7 +16,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import config
 from .auth import (
     authenticate, clear_auth_cookie, create_access_token, get_current_user, hash_password,
-    require_admin, require_staff, set_auth_cookie,
+    require_admin, require_staff, set_auth_cookie, verify_password,
 )
 from .database import SessionLocal, get_db, init_db
 from .models import Attendee, Event, Role, Ticket, User, utcnow
@@ -260,12 +260,14 @@ async def upload_ticket_pdf(
     try:
         if len(content) > config.MAX_PDF_BYTES:
             raise PdfProcessingError("File is too large (50 MB max)")
-        count = map_pdf_to_attendees(db, event.id, content)
+        count, spare = map_pdf_to_attendees(db, event.id, content)
     except PdfProcessingError as exc:
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=[str(exc)]), status=422)
     return render(request, "manage.html",
-                  manage_ctx(db, user, event, messages=[f"Split and attached {count} ticket(s)."]))
+                  manage_ctx(db, user, event, messages=[
+                      f"Split and attached {count} ticket(s)."
+                      + (f" {spare} extra page(s) were stored but not assigned." if spare else "")]))
 
 
 # --------------------------------------------------------------------------- doorman
@@ -362,14 +364,124 @@ def qr_modal(attendee_id: int, request: Request, user: User = Depends(require_st
     return render(request, "partials/qr_modal.html", {"attendee": attendee, "codes": codes})
 
 
-@app.get("/tickets/claim/{token}")
-def claim_ticket(token: str, db: Session = Depends(get_db)):
-    """Public, unguessable (UUID4 hex) download link that the QR code points to."""
-    ticket = db.query(Ticket).filter(Ticket.claim_token == token).first()
+def ticket_by_token(db: Session, token: str) -> Ticket:
+    ticket = db.query(Ticket).options(selectinload(Ticket.attendee)).filter(
+        Ticket.claim_token == token).first()
     if ticket is None:
         raise HTTPException(404, "Ticket not found")
+    return ticket
+
+
+@app.get("/tickets/claim/{token}", response_class=HTMLResponse)
+def claim_ticket(token: str, request: Request, db: Session = Depends(get_db)):
+    """Public, unguessable (UUID4 hex) landing page the QR code points to."""
+    ticket = ticket_by_token(db, token)
+    event = db.get(Event, ticket.event_id)
+    return render(request, "claim.html", {"ticket": ticket, "event": event,
+                                          "attendee": ticket.attendee})
+
+
+@app.get("/tickets/claim/{token}/download")
+def download_ticket(token: str, db: Session = Depends(get_db)):
+    ticket = ticket_by_token(db, token)
     path = Path(ticket.file_path).resolve()
     if not path.is_relative_to(config.STORAGE_DIR.resolve()) or not path.is_file():
         raise HTTPException(404, "Ticket file is unavailable")
     return FileResponse(path, media_type="application/pdf", filename=f"ticket-{ticket.page_number}.pdf",
                         headers={"Cache-Control": "private, no-store"})
+
+
+# --------------------------------------------------------------------------- users & account
+
+MIN_PASSWORD = 8
+
+
+def users_ctx(db: Session, user: User, **extra) -> dict:
+    return {"user": user, "users": db.query(User).order_by(User.created_at, User.id).all(),
+            "errors": [], "messages": [], "roles": list(Role), **extra}
+
+
+@app.get("/users", response_class=HTMLResponse)
+def users_page(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return render(request, "users.html", users_ctx(db, user))
+
+
+@app.post("/users", response_class=HTMLResponse)
+def create_user(
+    request: Request,
+    email: str = Form(...), full_name: str = Form(...), password: str = Form(...),
+    role: str = Form("doorman"),
+    user: User = Depends(require_admin), db: Session = Depends(get_db),
+):
+    email = email.strip().lower()
+    errors = []
+    if "@" not in email or " " in email or len(email) > 255:
+        errors.append("Enter a valid email address.")
+    if not full_name.strip():
+        errors.append("Full name is required.")
+    if len(password) < MIN_PASSWORD:
+        errors.append(f"Password must be at least {MIN_PASSWORD} characters.")
+    if role not in Role.__members__:
+        errors.append("Invalid role.")
+    if not errors and db.query(User).filter(User.email == email).first():
+        errors.append("A user with that email already exists.")
+    if errors:
+        return render(request, "users.html", users_ctx(db, user, errors=errors), status=422)
+    db.add(User(email=email, full_name=full_name.strip()[:255],
+                hashed_password=hash_password(password), role=Role[role]))
+    db.commit()
+    return render(request, "users.html", users_ctx(db, user, messages=[f"Created {email}."]))
+
+
+@app.post("/users/{user_id}", response_class=HTMLResponse)
+def update_user(
+    user_id: int, request: Request,
+    full_name: str = Form(...), role: str = Form(...), is_active: str = Form(""),
+    new_password: str = Form(""),
+    user: User = Depends(require_admin), db: Session = Depends(get_db),
+):
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(404, "User not found")
+    active = is_active == "on"
+    errors = []
+    if role not in Role.__members__:
+        errors.append("Invalid role.")
+    if not full_name.strip():
+        errors.append("Full name is required.")
+    if new_password and len(new_password) < MIN_PASSWORD:
+        errors.append(f"Password must be at least {MIN_PASSWORD} characters.")
+    if target.id == user.id and (role != Role.admin.value or not active):
+        errors.append("You cannot demote or deactivate your own account.")
+    if errors:
+        return render(request, "users.html", users_ctx(db, user, errors=errors), status=422)
+    target.full_name = full_name.strip()[:255]
+    target.role = Role[role]
+    target.is_active = active
+    if new_password:
+        target.hashed_password = hash_password(new_password)
+    db.commit()
+    return render(request, "users.html", users_ctx(db, user, messages=[f"Updated {target.email}."]))
+
+
+@app.get("/account", response_class=HTMLResponse)
+def account_page(request: Request, user: User = Depends(get_current_user)):
+    return render(request, "account.html", {"user": user, "errors": [], "messages": []})
+
+
+@app.post("/account/password", response_class=HTMLResponse)
+def change_password(
+    request: Request,
+    current_password: str = Form(...), new_password: str = Form(...),
+    user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    errors = []
+    if not verify_password(current_password, user.hashed_password):
+        errors.append("Current password is incorrect.")
+    if len(new_password) < MIN_PASSWORD:
+        errors.append(f"New password must be at least {MIN_PASSWORD} characters.")
+    if errors:
+        return render(request, "account.html", {"user": user, "errors": errors, "messages": []}, status=422)
+    user.hashed_password = hash_password(new_password)
+    db.commit()
+    return render(request, "account.html", {"user": user, "errors": [], "messages": ["Password updated."]})
