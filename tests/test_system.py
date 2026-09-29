@@ -393,3 +393,38 @@ def test_change_own_password(client):
     assert c.post("/account/password", data={"current_password": "oldpass11", "new_password": "x"}).status_code == 422
     assert c.post("/account/password", data={"current_password": "oldpass11", "new_password": "newpass22"}).status_code == 200
     login("pw@event.local", "newpass22")
+
+
+def test_whatsapp_sends_are_throttled_globally(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WHATSAPP_MIN_INTERVAL", 1.0)
+    monkeypatch.setattr(config, "WHATSAPP_JITTER", 0.0)
+    pdf = tmp_path / "t.pdf"
+    pdf.write_bytes(make_pdf(1))
+    stamps = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        stamps.append(__import__("time").monotonic())
+        return httpx.Response(201)
+
+    import asyncio
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            # three concurrent requests (e.g. three doormen tapping at once)
+            await asyncio.gather(*[
+                services.send_whatsapp_pdf(f"1555010000{i}", pdf, "hi", client=c) for i in range(3)])
+
+    asyncio.run(go())
+    assert len(stamps) == 3
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    assert all(g >= 0.98 for g in gaps), gaps
+
+
+def test_whatsapp_interval_has_one_second_floor(monkeypatch):
+    import importlib
+    monkeypatch.setenv("WHATSAPP_MIN_INTERVAL", "0.1")
+    try:
+        assert importlib.reload(config).WHATSAPP_MIN_INTERVAL == 1.0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)

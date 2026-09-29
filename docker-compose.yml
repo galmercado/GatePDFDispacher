@@ -11,6 +11,8 @@ services:
       EVOLUTION_API_URL: http://evolution-api:8080
       EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:?set EVOLUTION_API_KEY in .env}
       EVOLUTION_INSTANCE: ${EVOLUTION_INSTANCE:-event-door}
+      WHATSAPP_MIN_INTERVAL: ${WHATSAPP_MIN_INTERVAL:-1.5}
+      WHATSAPP_JITTER: ${WHATSAPP_JITTER:-0.5}
     volumes:
       - app_data:/srv/data
       - app_storage:/srv/storage

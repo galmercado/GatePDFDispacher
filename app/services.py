@@ -1,9 +1,12 @@
 """Bulk import parsing, PDF splitting/mapping and WhatsApp delivery (Evolution API)."""
 import base64
 import io
+import asyncio
 import json
+import random
 import re
 import shutil
+import time
 from pathlib import Path
 
 import httpx
@@ -282,6 +285,37 @@ class WhatsAppError(RuntimeError):
     pass
 
 
+class _SendThrottle:
+    """Serialises sends and enforces a minimum gap since the previous send finished.
+
+    Process-wide, so simultaneous requests from several doormen are queued rather
+    than fired together. (The app runs a single worker, so in-process is enough.)
+    """
+
+    def __init__(self) -> None:
+        self._lock: asyncio.Lock | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._last_done = 0.0
+
+    def lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._loop is not loop:
+            self._lock, self._loop = asyncio.Lock(), loop
+        return self._lock
+
+    async def wait_turn(self) -> None:
+        gap = config.WHATSAPP_MIN_INTERVAL + random.uniform(0, config.WHATSAPP_JITTER)
+        remaining = self._last_done + gap - time.monotonic()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+    def done(self) -> None:
+        self._last_done = time.monotonic()
+
+
+throttle = _SendThrottle()
+
+
 async def send_whatsapp_pdf(
     phone: str,
     pdf_path: str | Path,
@@ -310,9 +344,16 @@ async def send_whatsapp_pdf(
     owns_client = client is None
     client = client or httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0))
     try:
-        resp = await client.post(url, json=payload, headers=headers)
-    except httpx.HTTPError as exc:
-        raise WhatsAppError(f"Could not reach the WhatsApp gateway: {exc.__class__.__name__}")
+        async with throttle.lock():
+            await throttle.wait_turn()
+            try:
+                resp = await client.post(url, json=payload, headers=headers)
+            except httpx.HTTPError as exc:
+                raise WhatsAppError(
+                    f"Could not reach the WhatsApp gateway: {exc.__class__.__name__}"
+                )
+            finally:
+                throttle.done()
     finally:
         if owns_client:
             await client.aclose()

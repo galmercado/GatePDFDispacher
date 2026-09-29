@@ -21,6 +21,10 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://evolution-api:8080").rstrip("/")
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")
 EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "event-door")
+# Anti-ban throttle: minimum gap between any two outgoing WhatsApp messages
+# (global across all users). Never allowed below 1 second.
+WHATSAPP_MIN_INTERVAL = max(1.0, float(os.getenv("WHATSAPP_MIN_INTERVAL", "1.5")))
+WHATSAPP_JITTER = max(0.0, float(os.getenv("WHATSAPP_JITTER", "0.5")))
 
 DEFAULT_ADMIN_EMAIL = "admin@event.local"
 DEFAULT_ADMIN_PASSWORD = "admin1234"
