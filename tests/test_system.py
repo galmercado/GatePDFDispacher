@@ -594,3 +594,84 @@ def test_migration_adds_category_and_ticket_kind_columns(tmp_path):
     with eng.begin() as c:
         row = c.execute(text("SELECT category, adult_count, youth_count, ticket_count FROM attendees")).one()
     assert tuple(row) == ("פתוח", 3, 0, 3)
+
+
+# ----------------------------------------------------------------- Google sign-in
+
+@pytest.fixture()
+def google_on(monkeypatch):
+    monkeypatch.setattr(config, "GOOGLE_CLIENT_ID", "cid.apps.googleusercontent.com")
+    monkeypatch.setattr(config, "GOOGLE_CLIENT_SECRET", "secret")
+
+
+def test_google_disabled_by_default(client):
+    c = TestClient(app, follow_redirects=False)
+    assert "Sign in with Google" not in c.get("/login").text
+    assert c.get("/auth/google/login").status_code == 404
+    assert c.get("/auth/google/callback?code=x&state=y").status_code == 404
+
+
+def test_google_login_flow_only_admits_registered_users(client, google_on, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+    c = TestClient(app, follow_redirects=False)
+    assert "Sign in with Google" in c.get("/login").text
+    r = c.get("/auth/google/login")
+    assert r.status_code == 303 and r.headers["location"].startswith("https://accounts.google.com/")
+    q = parse_qs(urlsplit(r.headers["location"]).query)
+    assert q["redirect_uri"] == ["http://testserver/auth/google/callback"] and q["scope"] == ["openid email profile"]
+    state = q["state"][0]
+    assert "httponly" in r.headers["set-cookie"].lower()
+
+    async def registered(code, redirect_uri, client=None):
+        return {"email": "door@event.local", "name": "Door Person"}
+
+    async def stranger(code, redirect_uri, client=None):
+        return {"email": "stranger@gmail.com", "name": "Nope"}
+
+    monkeypatch.setattr("app.main.fetch_profile", registered)
+    assert c.get("/auth/google/callback", params={"code": "c", "state": "forged"}).status_code == 400  # bad state
+    state = parse_qs(urlsplit(c.get("/auth/google/login").headers["location"]).query)["state"][0]  # failure burns the state
+    r = c.get("/auth/google/callback", params={"code": "c", "state": state})
+    assert r.status_code == 303 and r.headers["location"] == "/events"
+    assert c.get("/events").status_code == 200
+
+    monkeypatch.setattr("app.main.fetch_profile", stranger)
+    c2 = TestClient(app, follow_redirects=False)
+    state2 = parse_qs(urlsplit(c2.get("/auth/google/login").headers["location"]).query)["state"][0]
+    r = c2.get("/auth/google/callback", params={"code": "c", "state": state2})
+    assert r.status_code == 403 and "not authorised" in r.text
+    assert c2.get("/events").status_code == 303                                   # no session issued
+    assert TestClient(app, follow_redirects=False).get("/auth/google/callback",
+                                                       params={"code": "c", "state": state2}).status_code == 400  # no cookie
+
+
+def test_google_profile_exchange_requires_verified_email(google_on):
+    import asyncio
+
+    def make(verified):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "oauth2.googleapis.com":
+                return httpx.Response(200, json={"access_token": "tok"})
+            return httpx.Response(200, json={"email": "A@Gmail.com", "email_verified": verified, "name": "A"})
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    from app import google_auth
+
+    async def go(verified):
+        async with make(verified) as c:
+            return await google_auth.fetch_profile("code", "http://x/cb", client=c)
+
+    assert asyncio.run(go(True)) == {"email": "a@gmail.com", "name": "A"}
+    with pytest.raises(google_auth.GoogleAuthError):
+        asyncio.run(go(False))
+
+
+def test_admin_can_create_google_only_user(admin, google_on):
+    r = admin.post("/users", data={"email": "g@event.local", "full_name": "G", "password": "", "role": "doorman"})
+    assert r.status_code == 200 and "Created g@event.local" in r.text
+    assert TestClient(app).post("/login", data={"email": "g@event.local", "password": ""}).status_code in (401, 422)
+
+
+def test_password_required_when_google_not_configured(admin):
+    r = admin.post("/users", data={"email": "p@event.local", "full_name": "P", "password": "", "role": "doorman"})
+    assert r.status_code == 422

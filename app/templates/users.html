@@ -8,11 +8,12 @@
 {% include "_alerts.html" %}
 
 <section class="mb-5 rounded-2xl border border-slate-800 bg-slate-900 p-5">
-  <h2 class="mb-3 flex items-center gap-2 font-semibold text-white"><i class="ph ph-user-plus text-brand-400"></i> Add user</h2>
+  <h2 class="mb-1 flex items-center gap-2 font-semibold text-white"><i class="ph ph-user-plus text-brand-400"></i> Add user</h2>
+  <p class="mb-3 text-sm text-slate-400">Only people listed here can sign in - with a password or, if enabled, with the Google account that uses the same email.</p>
   <form method="post" action="/users" class="grid gap-3 sm:grid-cols-2">
     <div><label class="{{ label }}" for="n-name">Full name</label><input id="n-name" name="full_name" required class="{{ field }}"></div>
     <div><label class="{{ label }}" for="n-email">Email</label><input id="n-email" name="email" type="email" required autocomplete="off" class="{{ field }}"></div>
-    <div><label class="{{ label }}" for="n-pass">Password (min 8)</label><input id="n-pass" name="password" type="password" minlength="8" required autocomplete="new-password" class="{{ field }}"></div>
+    <div><label class="{{ label }}" for="n-pass">Password (min 8) <span class="normal-case tracking-normal text-slate-500">- optional for Google sign-in</span></label><input id="n-pass" name="password" type="password" minlength="8" autocomplete="new-password" class="{{ field }}"></div>
     <div><label class="{{ label }}" for="n-role">Role</label>
       <select id="n-role" name="role" class="{{ field }}">{% for r in roles %}<option value="{{ r.value }}">{{ r.value|capitalize }}</option>{% endfor %}</select></div>
     <button class="flex items-center justify-center gap-2 rounded-xl bg-brand-500 py-3 font-semibold text-white hover:bg-brand-600 sm:col-span-2"><i class="ph-bold ph-plus"></i> Create user</button>

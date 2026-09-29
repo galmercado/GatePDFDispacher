@@ -29,6 +29,12 @@ EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "event-door")
 WHATSAPP_MIN_INTERVAL = max(1.0, float(os.getenv("WHATSAPP_MIN_INTERVAL", "1.5")))
 WHATSAPP_JITTER = max(0.0, float(os.getenv("WHATSAPP_JITTER", "0.5")))
 
+# Google sign-in (OAuth 2.0). Only users whose email is already in the Users list may sign in.
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+# Optional: an admin created at startup that signs in with Google (in addition to the default admin).
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
+
 DEFAULT_ADMIN_EMAIL = "admin@event.local"
 DEFAULT_ADMIN_PASSWORD = "admin1234"
 

@@ -1,5 +1,6 @@
 """FastAPI application: routes, templates and exception handlers."""
 import json
+import secrets
 from urllib.parse import urlsplit
 import logging
 from contextlib import asynccontextmanager
@@ -15,11 +16,12 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, data
+from . import config, data, google_auth
 from .auth import (
     authenticate, clear_auth_cookie, create_access_token, get_current_user, hash_password,
     require_admin, require_staff, set_auth_cookie, verify_password,
 )
+from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
 from .models import Attendee, Event, Role, Ticket, User, utcnow
 from .services import (
@@ -39,6 +41,11 @@ def seed_admin() -> None:
             if fixed != a.phone:
                 a.phone = fixed
         db.commit()
+        if config.ADMIN_EMAIL and not db.query(User).filter(User.email == config.ADMIN_EMAIL).first():
+            db.add(User(email=config.ADMIN_EMAIL, full_name="Administrator", role=Role.admin,
+                        hashed_password=hash_password(secrets.token_urlsafe(32))))  # Google sign-in only
+            db.commit()
+            log.warning("Seeded Google admin %s", config.ADMIN_EMAIL)
         if db.query(User).count() == 0:
             db.add(
                 User(
@@ -191,7 +198,7 @@ def login_page(request: Request, db: Session = Depends(get_db)):
         get_current_user(request, db)
         return RedirectResponse("/events", status_code=303)
     except HTTPException:
-        return render(request, "login.html", {"error": None, "email": ""})
+        return render(request, "login.html", {"error": None, "email": "", "google": google_auth.enabled()})
 
 
 @app.post("/login")
@@ -200,8 +207,55 @@ def login(request: Request, email: str = Form(...), password: str = Form(...),
     user = authenticate(db, email, password)
     if user is None:
         return render(request, "login.html",
-                      {"error": "Invalid email or password.", "email": email}, status=401)
+                      {"error": "Invalid email or password.", "email": email,
+                       "google": google_auth.enabled()}, status=401)
     resp = RedirectResponse("/events", status_code=303)
+    set_auth_cookie(resp, create_access_token(user))
+    return resp
+
+
+def oauth_redirect_uri(request: Request) -> str:
+    base = config.PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
+    return base + google_auth.CALLBACK_PATH
+
+
+def login_error(request: Request, message: str, status: int = 403) -> HTMLResponse:
+    resp = render(request, "login.html", {"error": message, "email": "", "google": google_auth.enabled()},
+                  status=status)
+    resp.delete_cookie(google_auth.STATE_COOKIE, path="/")
+    return resp
+
+
+@app.get("/auth/google/login", include_in_schema=False)
+def google_login(request: Request):
+    if not google_auth.enabled():
+        raise HTTPException(404, "Google sign-in is not configured")
+    state = secrets.token_urlsafe(24)
+    resp = RedirectResponse(google_auth.authorization_url(oauth_redirect_uri(request), state), status_code=303)
+    resp.set_cookie(google_auth.STATE_COOKIE, state, max_age=600, httponly=True, samesite="lax",
+                    secure=config.COOKIE_SECURE, path="/")
+    return resp
+
+
+@app.get(google_auth.CALLBACK_PATH, include_in_schema=False)
+async def google_callback(request: Request, code: str = "", state: str = "", error: str = "",
+                          db: Session = Depends(get_db)):
+    if not google_auth.enabled():
+        raise HTTPException(404, "Google sign-in is not configured")
+    expected = request.cookies.get(google_auth.STATE_COOKIE, "")
+    if error or not code or not expected or not secrets.compare_digest(expected, state):
+        return login_error(request, "Google sign-in was cancelled or expired. Please try again.", 400)
+    try:
+        profile = await fetch_profile(code, oauth_redirect_uri(request))
+    except GoogleAuthError as exc:
+        log.warning("Google sign-in failed: %s", exc)
+        return login_error(request, str(exc), 400)
+    user = db.query(User).filter(User.email == profile["email"]).first()
+    if user is None or not user.is_active:
+        log.warning("Google sign-in refused for %s (not an active user)", profile["email"])
+        return login_error(request, f"{profile['email']} is not authorised. Ask an admin to add your email under Users.")
+    resp = RedirectResponse("/events", status_code=303)
+    resp.delete_cookie(google_auth.STATE_COOKIE, path="/")
     set_auth_cookie(resp, create_access_token(user))
     return resp
 
@@ -588,7 +642,7 @@ def users_page(request: Request, user: User = Depends(require_admin), db: Sessio
 @app.post("/users", response_class=HTMLResponse)
 def create_user(
     request: Request,
-    email: str = Form(...), full_name: str = Form(...), password: str = Form(...),
+    email: str = Form(...), full_name: str = Form(...), password: str = Form(""),
     role: str = Form("doorman"),
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
@@ -598,8 +652,10 @@ def create_user(
         errors.append("Enter a valid email address.")
     if not full_name.strip():
         errors.append("Full name is required.")
-    if len(password) < MIN_PASSWORD:
+    if password and len(password) < MIN_PASSWORD:
         errors.append(f"Password must be at least {MIN_PASSWORD} characters.")
+    if not password and not google_auth.enabled():
+        errors.append("Set a password (Google sign-in is not configured).")
     if role not in Role.__members__:
         errors.append("Invalid role.")
     if not errors and db.query(User).filter(User.email == email).first():
@@ -607,7 +663,7 @@ def create_user(
     if errors:
         return render(request, "users.html", users_ctx(db, user, errors=errors), status=422)
     db.add(User(email=email, full_name=full_name.strip()[:255],
-                hashed_password=hash_password(password), role=Role[role]))
+                hashed_password=hash_password(password or secrets.token_urlsafe(32)), role=Role[role]))
     db.commit()
     return render(request, "users.html", users_ctx(db, user, messages=[f"Created {email}."]))
 

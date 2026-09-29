@@ -3,11 +3,15 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # APP_BIND=127.0.0.1 in production so only the Caddy proxy can reach the app
+      - "${APP_BIND:-0.0.0.0}:8000:8000"
     environment:
       SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       EVOLUTION_API_URL: http://evolution-api:8080
       EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:?set EVOLUTION_API_KEY in .env}
       EVOLUTION_INSTANCE: ${EVOLUTION_INSTANCE:-event-door}
@@ -60,8 +64,28 @@ services:
       timeout: 5s
       retries: 10
 
+  # HTTPS reverse proxy with automatic Let's Encrypt certificates. Production only:
+  #   docker compose --profile prod up -d --build
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["prod"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
 volumes:
   app_data:
   app_storage:
   evolution_instances:
   postgres_data:
+  caddy_data:
+  caddy_config:
