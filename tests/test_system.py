@@ -465,3 +465,25 @@ def test_gateway_error_details_are_surfaced(tmp_path):
 
     with pytest.raises(services.WhatsAppError, match="not registered on WhatsApp"):
         asyncio.run(go())
+
+
+def test_phone_normalisation_defaults_to_israel():
+    n = services.normalize_phone
+    for raw in ("525607772", "0525607772", "052-560-7772", "972525607772", "+972 52-560-7772",
+                "00972525607772", "+972 (0)52-560-7772", "972 52 560 7772"):
+        assert n(raw) == "972525607772", raw
+    assert n("+1 (555) 010-0001") == "15550100001"       # explicit "+" is left alone
+    assert n("15550100001") == "15550100001"              # long, no "+": assumed international
+    assert n(n("0525607772")) == n("0525607772")          # idempotent
+
+
+def test_import_and_search_use_normalised_phones(admin, doorman, event_id):
+    guests = [{"name": "Dana Levi", "phone": "052-5607772"}, {"name": "Noa Bar", "phone": "525607773"}]
+    r = admin.post(f"/events/{event_id}/attendees/import",
+                   files={"file": ("g.json", json.dumps(guests).encode())})
+    assert r.status_code == 200
+    with SessionLocal() as db:
+        phones = sorted(a.phone for a in db.query(Attendee).filter_by(event_id=event_id))
+    assert phones == ["972525607772", "972525607773"]
+    for q in ("0525607772", "525607772", "972525607772"):
+        assert "Dana Levi" in doorman.get(f"/events/{event_id}/search", params={"q": q}).text

@@ -1,5 +1,6 @@
 """Runtime configuration, read from environment variables."""
 import os
+import re
 from pathlib import Path
 
 
@@ -20,6 +21,8 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
 EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "http://evolution-api:8080").rstrip("/")
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")
+# Country code prepended to local numbers (e.g. 052-5607772 -> 972525607772).
+DEFAULT_COUNTRY_CODE = re.sub(r"\D", "", os.getenv("DEFAULT_COUNTRY_CODE", "972"))
 EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "event-door")
 # Anti-ban throttle: minimum gap between any two outgoing WhatsApp messages
 # (global across all users). Never allowed below 1 second.

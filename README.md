@@ -60,5 +60,6 @@ Back up the `app_data`, `app_storage` and `evolution_instances` volumes.
 - Doormen can view the event list and use the cockpit; only admins create events, import guests and upload PDFs.
 - Claim links (`/tickets/claim/{token}`) are public by design: a mobile landing page with a Download button (32-hex UUID4 tokens).
 - The PDF may have more pages than needed (extras are stored, unassigned) but not fewer than the guest list's total `ticket_count`; imports are all-or-nothing.
+- Phone numbers are stored in international format: local numbers get `DEFAULT_COUNTRY_CODE` (default `972`, Israel) prepended and a leading `0` dropped; numbers written with `+` or `00` are kept as-is. Existing guests are converted on startup.
 - The app runs one uvicorn worker (SQLite).
 - WhatsApp sends are queued app-wide with at least `WHATSAPP_MIN_INTERVAL` seconds (default 1.5, hard floor 1.0, plus random jitter) between any two messages, to reduce ban risk on the unofficial API.

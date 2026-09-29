@@ -23,7 +23,7 @@ from .database import SessionLocal, get_db, init_db
 from .models import Attendee, Event, Role, Ticket, User, utcnow
 from .services import (
     ImportValidationError, PdfProcessingError, WhatsAppError, import_attendees,
-    map_pdf_to_attendees, parse_guest_list, send_whatsapp_pdf,
+    map_pdf_to_attendees, normalize_phone, parse_guest_list, send_whatsapp_pdf,
 )
 
 log = logging.getLogger("gate")
@@ -33,6 +33,11 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 def seed_admin() -> None:
     with SessionLocal() as db:
+        for a in db.query(Attendee).all():  # bring older records to international format
+            fixed = normalize_phone(a.phone)
+            if fixed != a.phone:
+                a.phone = fixed
+        db.commit()
         if db.query(User).count() == 0:
             db.add(
                 User(
@@ -302,6 +307,8 @@ def search_attendees(db: Session, event_id: int, q: str, limit: int = 300) -> li
         digits = "".join(c for c in q if c.isdigit())
         if digits:
             conds.append(Attendee.phone.like(f"%{digits}%"))
+            if digits.startswith("0") and len(digits) > 1:  # local format: 052-5607772
+                conds.append(Attendee.phone.like(f"%{digits.lstrip('0')}%"))
         query = query.filter(or_(*conds))
     return query.order_by(func.lower(Attendee.name), Attendee.id).limit(limit).all()
 

@@ -34,6 +34,29 @@ COLUMN_ALIASES = {
 }
 
 
+def normalize_phone(raw) -> str:
+    """Return digits-only international format, adding DEFAULT_COUNTRY_CODE to local numbers.
+
+    +972 52-560-7772 / 00972525607772 / 972525607772 / 052-5607772 / 525607772
+        -> 972525607772. An explicit "+" or "00" prefix always means "already international".
+    Idempotent, so it is safe to apply again at send time.
+    """
+    text = str(raw if raw is not None else "").strip()
+    digits = re.sub(r"\D", "", text)
+    cc = config.DEFAULT_COUNTRY_CODE
+    if text.startswith("+") or digits.startswith("00"):
+        digits = digits.removeprefix("00")
+        # "+972 (0)52..." - drop the redundant trunk 0 after the country code
+        return cc + digits[len(cc) + 1:] if cc and digits.startswith(cc + "0") else digits
+    if digits.startswith("0"):
+        return cc + digits.lstrip("0")
+    if cc and digits.startswith(cc):
+        return digits
+    if cc and len(digits) <= 10:  # a national number without its leading 0
+        return cc + digits
+    return digits  # long number without "+": assume it already carries a country code
+
+
 class ImportValidationError(ValueError):
     def __init__(self, errors: list[str]):
         super().__init__("; ".join(errors))
@@ -66,10 +89,12 @@ class AttendeeIn(BaseModel):
     @field_validator("phone", mode="before")
     @classmethod
     def _phone(cls, v) -> str:
-        digits = re.sub(r"\D", "", str(v if v is not None else ""))
-        if not 7 <= len(digits) <= 15:
-            raise ValueError("phone must contain 7-15 digits (include country code)")
-        return digits
+        if not 7 <= len(re.sub(r"\D", "", str(v if v is not None else ""))) <= 15:
+            raise ValueError("phone must contain 7-15 digits")
+        phone = normalize_phone(v)
+        if not 8 <= len(phone) <= 15:
+            raise ValueError("phone number is not a valid international number")
+        return phone
 
     @field_validator("email", "notes", mode="before")
     @classmethod
@@ -355,7 +380,7 @@ async def send_whatsapp_pdf(
 
     url = f"{config.EVOLUTION_API_URL}/message/sendMedia/{config.EVOLUTION_INSTANCE}"
     payload = {
-        "number": re.sub(r"\D", "", phone),
+        "number": normalize_phone(phone),
         "mediatype": "document",
         "mimetype": "application/pdf",
         "caption": caption,
