@@ -78,9 +78,21 @@ async def revoke_message(db: Session, msg: SentMessage) -> bool:
     return True
 
 
-async def revoke_attendee_messages(db: Session, attendee_id: int) -> tuple[int, int]:
-    """Delete every live ticket message sent to this guest. Returns (deleted, failed)."""
-    pending = db.query(SentMessage).filter(SentMessage.attendee_id == attendee_id,
+def shares_phone(db: Session, attendee: Attendee) -> bool:
+    """True if another order (attendee) of the same event uses this phone number."""
+    return db.query(Attendee.id).filter(Attendee.event_id == attendee.event_id, Attendee.phone == attendee.phone,
+                                        Attendee.id != attendee.id).first() is not None
+
+
+async def revoke_attendee_messages(db: Session, attendee: Attendee) -> tuple[int, int]:
+    """Delete every live ticket message sent to this guest. Returns (deleted, failed).
+
+    Phone numbers with several orders are left alone: those messages are never deleted
+    (one chat can hold tickets for more than one order).
+    """
+    if shares_phone(db, attendee):
+        return 0, 0
+    pending = db.query(SentMessage).filter(SentMessage.attendee_id == attendee.id,
                                            SentMessage.status == "sent").all()
     ok = 0
     for msg in pending:
@@ -88,9 +100,16 @@ async def revoke_attendee_messages(db: Session, attendee_id: int) -> tuple[int, 
     return ok, len(pending) - ok
 
 
-async def cleanup_expired_messages(now: datetime | None = None) -> int:
+def recent_event_exists(db: Session, now: datetime) -> bool:
+    window = timedelta(hours=config.WHATSAPP_CLEANUP_WINDOW_HOURS)
+    return db.query(Event.id).filter(Event.event_date >= now - window, Event.event_date <= now).first() is not None
+
+
+async def cleanup_expired_messages(now: datetime | None = None, force: bool = False) -> int:
     """Delete ticket messages older than WHATSAPP_AUTO_DELETE_HOURS; give up (mark expired) once
-    WhatsApp no longer allows deleting them. Returns the number deleted."""
+    WhatsApp no longer allows deleting them. Does nothing (and makes no WhatsApp calls) unless an
+    event happened within WHATSAPP_CLEANUP_WINDOW_HOURS, and never touches phone numbers with
+    several orders. Returns the number deleted."""
     if config.WHATSAPP_AUTO_DELETE_HOURS <= 0:
         return 0
     now = now or utcnow()
@@ -98,8 +117,13 @@ async def cleanup_expired_messages(now: datetime | None = None) -> int:
     stale = now - timedelta(hours=config.WHATSAPP_DELETE_GIVE_UP_HOURS)
     deleted = 0
     with SessionLocal() as db:
+        if not force and not recent_event_exists(db, now):
+            return 0
         for msg in db.query(SentMessage).filter(SentMessage.status == "sent",
                                                 SentMessage.sent_at <= due).order_by(SentMessage.sent_at).all():
+            attendee = db.get(Attendee, msg.attendee_id)
+            if attendee is None or shares_phone(db, attendee):
+                continue
             if msg.sent_at <= stale:
                 msg.status = "expired"
                 db.commit()
@@ -109,14 +133,15 @@ async def cleanup_expired_messages(now: datetime | None = None) -> int:
 
 
 async def cleanup_loop() -> None:
+    await asyncio.sleep(config.WHATSAPP_CLEANUP_STARTUP_DELAY)
     while True:
-        await asyncio.sleep(config.WHATSAPP_CLEANUP_INTERVAL)
         try:
             n = await cleanup_expired_messages()
             if n:
                 log.info("Auto-deleted %s expired WhatsApp ticket message(s)", n)
         except Exception:  # never let the background task die
             log.exception("WhatsApp cleanup run failed")
+        await asyncio.sleep(config.WHATSAPP_CLEANUP_INTERVAL_HOURS * 3600)
 
 
 @asynccontextmanager
@@ -531,7 +556,7 @@ async def delete_attendee(attendee_id: int, request: Request, user: User = Depen
     attendee = get_attendee_or_404(db, attendee_id)
     event = get_event_or_404(db, attendee.event_id)
     name = attendee.name
-    await revoke_attendee_messages(db, attendee.id)   # best effort: pull their ticket messages
+    await revoke_attendee_messages(db, attendee)   # best effort: pull their ticket messages
     release_tickets(db, attendee)      # their ticket pages go back to the pool for other guests
     db.delete(attendee)
     db.commit()
@@ -623,7 +648,7 @@ async def toggle_check_in(attendee_id: int, request: Request, user: User = Depen
     db.commit()
     note = None
     if attendee.checked_in and config.WHATSAPP_DELETE_ON_ADMIT:
-        note = revoke_toast(*await revoke_attendee_messages(db, attendee.id))
+        note = revoke_toast(*await revoke_attendee_messages(db, attendee))
     return card_response(request, attendee, note or "refreshStats")
 
 
@@ -635,7 +660,7 @@ async def whatsapp_dispatch(attendee_id: int, request: Request,
     mark_admitted(db, attendee)
     if not attendee.tickets:
         return card_response(request, attendee, toast("No ticket PDF is attached to this guest.", "error"))
-    await revoke_attendee_messages(db, attendee.id)   # earlier ticket messages are superseded
+    await revoke_attendee_messages(db, attendee)   # earlier ticket messages are superseded
     try:
         for ticket in attendee.tickets:
             ref = await send_whatsapp_pdf(
@@ -673,7 +698,7 @@ async def qr_modal(attendee_id: int, request: Request, user: User = Depends(requ
     mark_admitted(db, attendee)
     note = None
     if config.WHATSAPP_DELETE_ON_ADMIT:
-        note = revoke_toast(*await revoke_attendee_messages(db, attendee.id))
+        note = revoke_toast(*await revoke_attendee_messages(db, attendee))
     base = public_base_url(request)
     unreachable = is_loopback(base)
     codes = []

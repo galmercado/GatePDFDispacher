@@ -85,9 +85,14 @@ between any two messages, to reduce the ban risk of the unofficial API.
 Every ticket the app sends is remembered (WhatsApp message id). It is then removed with WhatsApp's **delete for everyone**:
 - **on admission** - when the guest is admitted (Admit button or QR), earlier ticket messages sent to them disappear, so a used ticket
   can't be forwarded. Tapping WhatsApp both admits and sends: the *new* message stays, anything sent earlier is deleted;
-- **after 24 hours** - a background job deletes any ticket message older than `WHATSAPP_AUTO_DELETE_HOURS` (default 24; `0` disables),
-  retrying every minute; it gives up after 46 h because WhatsApp stops allowing delete-for-everyone after about two days;
+- **after 24 hours** - a background job deletes ticket messages older than `WHATSAPP_AUTO_DELETE_HOURS` (default 24; `0` disables).
+  To keep WhatsApp traffic low it is **not** continuous: it wakes up every `WHATSAPP_CLEANUP_INTERVAL_HOURS` (default 12) and only contacts
+  WhatsApp if an event took place within the last `WHATSAPP_CLEANUP_WINDOW_HOURS` (default 48), so deletion happens 24-36 h after sending.
+  It gives up after 47 h, because WhatsApp stops allowing delete-for-everyone after about two days;
 - when a guest is removed from the event.
+
+**Phone numbers with more than one order are never auto-deleted** (admission, resend, removal and the timer all skip them), because
+one chat can hold tickets for several orders.
 
 `WHATSAPP_DELETE_ON_ADMIT=false` turns the on-admission deletion off. Evolution API does not expose WhatsApp's own *disappearing
 messages* timer for one-to-one chats, which is why the app does the deleting itself. The guest will see "This message was deleted";

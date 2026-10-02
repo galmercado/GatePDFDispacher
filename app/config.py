@@ -43,8 +43,13 @@ DEFAULT_ADMIN_PASSWORD = "admin1234"
 # everyone for roughly two days, so keep this well below 48.
 WHATSAPP_AUTO_DELETE_HOURS = float(os.getenv("WHATSAPP_AUTO_DELETE_HOURS", "24"))
 WHATSAPP_DELETE_ON_ADMIT = _bool("WHATSAPP_DELETE_ON_ADMIT", True)
-WHATSAPP_CLEANUP_INTERVAL = max(5.0, float(os.getenv("WHATSAPP_CLEANUP_INTERVAL", "60")))
-WHATSAPP_DELETE_GIVE_UP_HOURS = 46.0
+# The timer-based cleanup is deliberately infrequent (to look less like a bot to WhatsApp): it wakes up every
+# WHATSAPP_CLEANUP_INTERVAL_HOURS and only talks to WhatsApp if an event took place in the last
+# WHATSAPP_CLEANUP_WINDOW_HOURS.
+WHATSAPP_CLEANUP_INTERVAL_HOURS = max(1.0, float(os.getenv("WHATSAPP_CLEANUP_INTERVAL_HOURS", "12")))
+WHATSAPP_CLEANUP_WINDOW_HOURS = float(os.getenv("WHATSAPP_CLEANUP_WINDOW_HOURS", "48"))
+WHATSAPP_CLEANUP_STARTUP_DELAY = 300.0  # seconds after boot before the first check
+WHATSAPP_DELETE_GIVE_UP_HOURS = 47.0
 
 MAX_PDF_BYTES = 200 * 1024 * 1024
 MAX_LIST_BYTES = 5 * 1024 * 1024
