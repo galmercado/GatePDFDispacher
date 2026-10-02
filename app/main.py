@@ -1,10 +1,11 @@
 """FastAPI application: routes, templates and exception handlers."""
+import asyncio
 import json
 import secrets
 from urllib.parse import urlsplit
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import segno
@@ -23,9 +24,10 @@ from .auth import (
 )
 from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
-from .models import Attendee, Event, Role, Ticket, User, utcnow
+from .models import Attendee, Event, Role, SentMessage, Ticket, User, utcnow
 from .services import (
-    AttendeeIn, ImportValidationError, PdfProcessingError, WhatsAppError, add_ticket_pdf, import_attendees,
+    AttendeeIn, ImportValidationError, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
+    import_attendees,
     normalize_phone, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, ticket_status,
 )
 
@@ -62,12 +64,71 @@ def seed_admin() -> None:
             )
 
 
+async def revoke_message(db: Session, msg: SentMessage) -> bool:
+    """Delete one sent ticket message for everyone; record the outcome. Returns success."""
+    try:
+        await delete_whatsapp_message(msg.remote_jid, msg.message_id)
+    except WhatsAppError as exc:
+        msg.attempts += 1
+        db.commit()
+        log.warning("Could not delete WhatsApp message %s (attempt %s): %s", msg.message_id, msg.attempts, exc)
+        return False
+    msg.status, msg.deleted_at = "deleted", utcnow()
+    db.commit()
+    return True
+
+
+async def revoke_attendee_messages(db: Session, attendee_id: int) -> tuple[int, int]:
+    """Delete every live ticket message sent to this guest. Returns (deleted, failed)."""
+    pending = db.query(SentMessage).filter(SentMessage.attendee_id == attendee_id,
+                                           SentMessage.status == "sent").all()
+    ok = 0
+    for msg in pending:
+        ok += await revoke_message(db, msg)
+    return ok, len(pending) - ok
+
+
+async def cleanup_expired_messages(now: datetime | None = None) -> int:
+    """Delete ticket messages older than WHATSAPP_AUTO_DELETE_HOURS; give up (mark expired) once
+    WhatsApp no longer allows deleting them. Returns the number deleted."""
+    if config.WHATSAPP_AUTO_DELETE_HOURS <= 0:
+        return 0
+    now = now or utcnow()
+    due = now - timedelta(hours=config.WHATSAPP_AUTO_DELETE_HOURS)
+    stale = now - timedelta(hours=config.WHATSAPP_DELETE_GIVE_UP_HOURS)
+    deleted = 0
+    with SessionLocal() as db:
+        for msg in db.query(SentMessage).filter(SentMessage.status == "sent",
+                                                SentMessage.sent_at <= due).order_by(SentMessage.sent_at).all():
+            if msg.sent_at <= stale:
+                msg.status = "expired"
+                db.commit()
+                continue
+            deleted += await revoke_message(db, msg)
+    return deleted
+
+
+async def cleanup_loop() -> None:
+    while True:
+        await asyncio.sleep(config.WHATSAPP_CLEANUP_INTERVAL)
+        try:
+            n = await cleanup_expired_messages()
+            if n:
+                log.info("Auto-deleted %s expired WhatsApp ticket message(s)", n)
+        except Exception:  # never let the background task die
+            log.exception("WhatsApp cleanup run failed")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     config.STORAGE_DIR.joinpath("tickets").mkdir(parents=True, exist_ok=True)
     init_db()
     seed_admin()
-    yield
+    task = asyncio.create_task(cleanup_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
 
 
 app = FastAPI(title="Gate - Event Ticketing & Door Vetting", lifespan=lifespan)
@@ -465,11 +526,12 @@ def edit_attendee(
 
 
 @app.post("/attendees/{attendee_id}/delete", response_class=HTMLResponse)
-def delete_attendee(attendee_id: int, request: Request, user: User = Depends(require_admin),
-                    db: Session = Depends(get_db)):
+async def delete_attendee(attendee_id: int, request: Request, user: User = Depends(require_admin),
+                          db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
     event = get_event_or_404(db, attendee.event_id)
     name = attendee.name
+    await revoke_attendee_messages(db, attendee.id)   # best effort: pull their ticket messages
     release_tickets(db, attendee)      # their ticket pages go back to the pool for other guests
     db.delete(attendee)
     db.commit()
@@ -544,14 +606,25 @@ def card_response(request: Request, attendee: Attendee, trigger: dict | str) -> 
                   {"attendees": [attendee], "q": "x"}, headers={"HX-Trigger": header})
 
 
+def revoke_toast(deleted: int, failed: int) -> dict | None:
+    if failed:
+        return toast("Admitted, but the WhatsApp ticket message could not be deleted yet - it will be retried.", "error")
+    if deleted:
+        return toast("Ticket message deleted from the guest's WhatsApp")
+    return None
+
+
 @app.post("/attendees/{attendee_id}/toggle", response_class=HTMLResponse)
-def toggle_check_in(attendee_id: int, request: Request, user: User = Depends(require_staff),
-                    db: Session = Depends(get_db)):
+async def toggle_check_in(attendee_id: int, request: Request, user: User = Depends(require_staff),
+                          db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
     attendee.checked_in = not attendee.checked_in
     attendee.checked_in_at = utcnow() if attendee.checked_in else None
     db.commit()
-    return card_response(request, attendee, "refreshStats")
+    note = None
+    if attendee.checked_in and config.WHATSAPP_DELETE_ON_ADMIT:
+        note = revoke_toast(*await revoke_attendee_messages(db, attendee.id))
+    return card_response(request, attendee, note or "refreshStats")
 
 
 @app.post("/attendees/{attendee_id}/whatsapp", response_class=HTMLResponse)
@@ -562,13 +635,18 @@ async def whatsapp_dispatch(attendee_id: int, request: Request,
     mark_admitted(db, attendee)
     if not attendee.tickets:
         return card_response(request, attendee, toast("No ticket PDF is attached to this guest.", "error"))
+    await revoke_attendee_messages(db, attendee.id)   # earlier ticket messages are superseded
     try:
         for ticket in attendee.tickets:
-            await send_whatsapp_pdf(
+            ref = await send_whatsapp_pdf(
                 attendee.phone, ticket.file_path,
                 caption=f"Hi {attendee.name.split()[0]}, here is your ticket for {event.name}.",
                 file_name=f"ticket-{ticket.page_number}.pdf",
             )
+            if ref:  # remember it so it can be deleted on admission / after 24h
+                db.add(SentMessage(event_id=event.id, attendee_id=attendee.id,
+                                   remote_jid=ref.remote_jid, message_id=ref.message_id))
+                db.commit()
     except WhatsAppError as exc:
         log.warning("WhatsApp dispatch failed for attendee %s: %s", attendee.id, exc)
         return card_response(request, attendee, toast(f"WhatsApp failed: {exc}", "error"))
@@ -589,10 +667,13 @@ def public_base_url(request: Request) -> str:
 
 
 @app.post("/attendees/{attendee_id}/qr", response_class=HTMLResponse)
-def qr_modal(attendee_id: int, request: Request, user: User = Depends(require_staff),
+async def qr_modal(attendee_id: int, request: Request, user: User = Depends(require_staff),
              db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
     mark_admitted(db, attendee)
+    note = None
+    if config.WHATSAPP_DELETE_ON_ADMIT:
+        note = revoke_toast(*await revoke_attendee_messages(db, attendee.id))
     base = public_base_url(request)
     unreachable = is_loopback(base)
     codes = []
@@ -603,7 +684,7 @@ def qr_modal(attendee_id: int, request: Request, user: User = Depends(require_st
                       "svg": qr.svg_data_uri(scale=8, border=2, dark="#0f172a", light="#ffffff")})
     return render(request, "partials/qr_modal.html",
                   {"attendee": attendee, "codes": codes, "unreachable": unreachable},
-                  headers={"HX-Trigger": "refreshStats"})
+                  headers={"HX-Trigger": json.dumps({"refreshStats": "", **note}) if note else "refreshStats"})
 
 
 def ticket_by_token(db: Session, token: str) -> Ticket:

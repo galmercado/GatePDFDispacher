@@ -80,6 +80,19 @@ recreate the instance (`curl -X DELETE http://localhost:8080/instance/delete/$EV
 WhatsApp sends are queued app-wide with at least `WHATSAPP_MIN_INTERVAL` seconds (default 1.5, hard floor 1.0, plus jitter)
 between any two messages, to reduce the ban risk of the unofficial API.
 
+### Ticket messages are deleted automatically
+
+Every ticket the app sends is remembered (WhatsApp message id). It is then removed with WhatsApp's **delete for everyone**:
+- **on admission** - when the guest is admitted (Admit button or QR), earlier ticket messages sent to them disappear, so a used ticket
+  can't be forwarded. Tapping WhatsApp both admits and sends: the *new* message stays, anything sent earlier is deleted;
+- **after 24 hours** - a background job deletes any ticket message older than `WHATSAPP_AUTO_DELETE_HOURS` (default 24; `0` disables),
+  retrying every minute; it gives up after 46 h because WhatsApp stops allowing delete-for-everyone after about two days;
+- when a guest is removed from the event.
+
+`WHATSAPP_DELETE_ON_ADMIT=false` turns the on-admission deletion off. Evolution API does not expose WhatsApp's own *disappearing
+messages* timer for one-to-one chats, which is why the app does the deleting itself. The guest will see "This message was deleted";
+the app can only delete messages it sent after this feature was deployed.
+
 ## Deploy to Oracle Cloud Always-Free (ARM)
 
 Result: `https://tickets.your-domain` served by Caddy (automatic HTTPS), app + Evolution + Postgres in Docker on an

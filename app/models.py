@@ -104,3 +104,19 @@ class SpareTicket(Base):
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
     page_number: Mapped[int] = mapped_column(Integer)
     file_path: Mapped[str] = mapped_column(String(512))
+
+
+class SentMessage(Base):
+    """A ticket message delivered over WhatsApp, kept so it can be deleted for everyone later."""
+
+    __tablename__ = "sent_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    attendee_id: Mapped[int] = mapped_column(ForeignKey("attendees.id", ondelete="CASCADE"), index=True)
+    remote_jid: Mapped[str] = mapped_column(String(64))
+    message_id: Mapped[str] = mapped_column(String(128))
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="sent", index=True)  # sent | deleted | expired
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

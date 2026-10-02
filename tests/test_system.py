@@ -741,3 +741,149 @@ def test_admin_can_create_google_only_user(admin, google_on):
 def test_password_required_when_google_not_configured(admin):
     r = admin.post("/users", data={"email": "p@event.local", "full_name": "P", "password": "", "role": "doorman"})
     assert r.status_code == 422
+
+
+# ----------------------------------------------------------------- WhatsApp message deletion
+
+def test_gateway_returns_message_ref_and_deletes_for_everyone(tmp_path):
+    import asyncio
+    pdf = tmp_path / "t.pdf"
+    pdf.write_bytes(make_pdf(1))
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, json.loads(request.content)))
+        if request.method == "POST":
+            return httpx.Response(201, json={"key": {"remoteJid": "972501234567@s.whatsapp.net", "fromMe": True, "id": "3EB0ABC"}})
+        return httpx.Response(200, json={"status": "SUCCESS"})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            ref = await services.send_whatsapp_pdf("0501234567", pdf, "hi", client=c)
+            await services.delete_whatsapp_message(ref.remote_jid, ref.message_id, client=c)
+            return ref
+
+    ref = asyncio.run(go())
+    assert tuple(ref) == ("972501234567@s.whatsapp.net", "3EB0ABC")
+    method, path, body = calls[1]
+    assert (method, path) == ("DELETE", f"/chat/deleteMessageForEveryone/{config.EVOLUTION_INSTANCE}")
+    assert body == {"id": "3EB0ABC", "remoteJid": "972501234567@s.whatsapp.net", "fromMe": True}
+
+
+@pytest.fixture()
+def wa(monkeypatch):
+    """Fake gateway: records sends and deletes; deletes can be made to fail."""
+    state = {"sent": [], "deleted": [], "fail_delete": False, "n": 0}
+
+    async def send(phone, path, caption, file_name="t.pdf", client=None):
+        state["n"] += 1
+        ref = services.SentRef(f"{phone}@s.whatsapp.net", f"MSG{state['n']}")
+        state["sent"].append(ref.message_id)
+        return ref
+
+    async def delete(remote_jid, message_id, client=None):
+        if state["fail_delete"]:
+            raise services.WhatsAppError("gateway down")
+        state["deleted"].append(message_id)
+
+    monkeypatch.setattr("app.main.send_whatsapp_pdf", send)
+    monkeypatch.setattr("app.main.delete_whatsapp_message", delete)
+    return state
+
+
+def message_status(attendee_id):
+    from app.models import SentMessage
+    with SessionLocal() as db:
+        return {m.message_id: m.status for m in db.query(SentMessage).filter_by(attendee_id=attendee_id)}
+
+
+def test_admitting_deletes_the_ticket_message(admin, doorman, event_id, wa):
+    ada = seeded_event(admin, event_id)                                  # Ada has 2 tickets
+    doorman.post(f"/attendees/{ada}/whatsapp")
+    assert wa["sent"] == ["MSG1", "MSG2"]
+    # tapping WhatsApp admits, but its own freshly sent messages are not deleted
+    assert message_status(ada) == {"MSG1": "sent", "MSG2": "sent"} and wa["deleted"] == []
+    doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})       # undo
+    r = doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})   # admit again
+    assert "deleted from the guest" in r.headers["HX-Trigger"]
+    assert wa["deleted"] == ["MSG1", "MSG2"]
+    assert message_status(ada) == {"MSG1": "deleted", "MSG2": "deleted"}
+
+
+def test_qr_admission_and_resend_delete_older_messages(admin, doorman, event_id, wa):
+    ada = seeded_event(admin, event_id)
+    doorman.post(f"/attendees/{ada}/whatsapp")                           # MSG1, MSG2
+    doorman.post(f"/attendees/{ada}/whatsapp")                           # resend supersedes the first pair
+    assert wa["deleted"] == ["MSG1", "MSG2"] and wa["sent"] == ["MSG1", "MSG2", "MSG3", "MSG4"]
+    r = doorman.post(f"/attendees/{ada}/qr")
+    assert "toast" in r.headers["HX-Trigger"] and wa["deleted"] == ["MSG1", "MSG2", "MSG3", "MSG4"]
+    assert set(message_status(ada).values()) == {"deleted"}
+
+
+def test_failed_delete_is_reported_and_retried_later(admin, doorman, event_id, wa):
+    ada = seeded_event(admin, event_id)
+    doorman.post(f"/attendees/{ada}/whatsapp")
+    doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})        # undo
+    wa["fail_delete"] = True
+    r = doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})
+    assert "Admitted" in r.text and "could not be deleted" in r.headers["HX-Trigger"]
+    assert set(message_status(ada).values()) == {"sent"}
+    wa["fail_delete"] = False
+    import asyncio
+    from datetime import timedelta
+    from app.main import cleanup_expired_messages
+    from app.models import SentMessage, utcnow
+    with SessionLocal() as db:
+        for m in db.query(SentMessage).filter_by(attendee_id=ada):
+            m.sent_at = utcnow() - timedelta(hours=25)
+        db.commit()
+    assert asyncio.run(cleanup_expired_messages()) == 2
+    assert set(message_status(ada).values()) == {"deleted"}
+
+
+def test_messages_are_auto_deleted_after_24_hours(admin, doorman, event_id, wa, monkeypatch):
+    import asyncio
+    from datetime import timedelta
+    from app.main import cleanup_expired_messages
+    from app.models import SentMessage, utcnow
+    ada = seeded_event(admin, event_id)
+    doorman.post(f"/attendees/{ada}/whatsapp")                           # MSG1 + MSG2, guest not "re-admitted"
+    with SessionLocal() as db:
+        m1, m2 = db.query(SentMessage).filter_by(attendee_id=ada).order_by(SentMessage.id).all()
+        m1.sent_at = utcnow() - timedelta(hours=23)                      # not due yet
+        m2.sent_at = utcnow() - timedelta(hours=24, minutes=1)           # due
+        db.commit()
+    assert asyncio.run(cleanup_expired_messages()) == 1
+    st = message_status(ada)
+    assert st[m1.message_id] == "sent" and st[m2.message_id] == "deleted"
+    with SessionLocal() as db:                                           # too old for WhatsApp: give up
+        db.get(SentMessage, m1.id).sent_at = utcnow() - timedelta(hours=47)
+        db.commit()
+    assert asyncio.run(cleanup_expired_messages()) == 0
+    assert message_status(ada)[m1.message_id] == "expired"
+
+
+def test_deletion_switches(admin, doorman, event_id, wa, monkeypatch):
+    import asyncio
+    from datetime import timedelta
+    from app.main import cleanup_expired_messages
+    from app.models import SentMessage, utcnow
+    ada = seeded_event(admin, event_id)
+    monkeypatch.setattr(config, "WHATSAPP_DELETE_ON_ADMIT", False)
+    doorman.post(f"/attendees/{ada}/whatsapp")
+    doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})        # undo
+    doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})        # admit: no deletion
+    assert wa["deleted"] == []
+    monkeypatch.setattr(config, "WHATSAPP_AUTO_DELETE_HOURS", 0)
+    with SessionLocal() as db:
+        for m in db.query(SentMessage):
+            m.sent_at = utcnow() - timedelta(hours=30)
+        db.commit()
+    assert asyncio.run(cleanup_expired_messages()) == 0 and wa["deleted"] == []
+
+
+def test_removing_a_guest_pulls_their_messages(admin, doorman, event_id, wa):
+    ada = seeded_event(admin, event_id)
+    doorman.post(f"/attendees/{ada}/whatsapp")
+    admin.post(f"/attendees/{ada}/delete")
+    assert wa["deleted"] == ["MSG1", "MSG2"]

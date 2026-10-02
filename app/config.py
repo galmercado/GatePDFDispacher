@@ -38,5 +38,13 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
 DEFAULT_ADMIN_EMAIL = "admin@event.local"
 DEFAULT_ADMIN_PASSWORD = "admin1234"
 
+# Ticket messages are removed from WhatsApp ("delete for everyone") when the guest is admitted and, as a
+# safety net, this many hours after sending (0 disables the timer). WhatsApp only allows deleting for
+# everyone for roughly two days, so keep this well below 48.
+WHATSAPP_AUTO_DELETE_HOURS = float(os.getenv("WHATSAPP_AUTO_DELETE_HOURS", "24"))
+WHATSAPP_DELETE_ON_ADMIT = _bool("WHATSAPP_DELETE_ON_ADMIT", True)
+WHATSAPP_CLEANUP_INTERVAL = max(5.0, float(os.getenv("WHATSAPP_CLEANUP_INTERVAL", "60")))
+WHATSAPP_DELETE_GIVE_UP_HOURS = 46.0
+
 MAX_PDF_BYTES = 200 * 1024 * 1024
 MAX_LIST_BYTES = 5 * 1024 * 1024

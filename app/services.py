@@ -9,6 +9,7 @@ import re
 import shutil
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import httpx
 import pandas as pd
@@ -447,30 +448,16 @@ class _SendThrottle:
 throttle = _SendThrottle()
 
 
-async def send_whatsapp_pdf(
-    phone: str,
-    pdf_path: str | Path,
-    caption: str,
-    file_name: str = "ticket.pdf",
-    client: httpx.AsyncClient | None = None,
-) -> None:
-    """Send a PDF document through Evolution API's /message/sendMedia/{instance}."""
+class SentRef(NamedTuple):
+    remote_jid: str
+    message_id: str
+
+
+async def _gateway_call(method: str, path: str, payload: dict, client: httpx.AsyncClient | None) -> httpx.Response:
+    """One throttled call to Evolution API (every send/delete shares the same minimum gap)."""
     if not config.EVOLUTION_API_KEY:
         raise WhatsAppError("EVOLUTION_API_KEY is not configured")
-    try:
-        encoded = base64.b64encode(Path(pdf_path).read_bytes()).decode("ascii")
-    except OSError as exc:
-        raise WhatsAppError(f"Ticket file unavailable: {exc}")
-
-    url = f"{config.EVOLUTION_API_URL}/message/sendMedia/{config.EVOLUTION_INSTANCE}"
-    payload = {
-        "number": normalize_phone(phone),
-        "mediatype": "document",
-        "mimetype": "application/pdf",
-        "caption": caption,
-        "media": encoded,
-        "fileName": file_name,
-    }
+    url = f"{config.EVOLUTION_API_URL}{path}/{config.EVOLUTION_INSTANCE}"
     headers = {"apikey": config.EVOLUTION_API_KEY, "Content-Type": "application/json"}
     owns_client = client is None
     client = client or httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0))
@@ -478,7 +465,7 @@ async def send_whatsapp_pdf(
         async with throttle.lock():
             await throttle.wait_turn()
             try:
-                resp = await client.post(url, json=payload, headers=headers)
+                resp = await client.request(method, url, json=payload, headers=headers)
             except httpx.HTTPError as exc:
                 raise WhatsAppError(
                     f"Could not reach the WhatsApp gateway: {exc.__class__.__name__}"
@@ -490,5 +477,48 @@ async def send_whatsapp_pdf(
             await client.aclose()
     if resp.status_code >= 400:
         detail = describe_gateway_error(resp)
-        log.warning("Evolution API HTTP %s for %s: %s", resp.status_code, payload["number"], resp.text[:500])
-        raise WhatsAppError(f"WhatsApp gateway rejected the message (HTTP {resp.status_code}): {detail}")
+        log.warning("Evolution API HTTP %s on %s: %s", resp.status_code, path, resp.text[:500])
+        raise WhatsAppError(f"WhatsApp gateway rejected the request (HTTP {resp.status_code}): {detail}")
+    return resp
+
+
+async def send_whatsapp_pdf(
+    phone: str,
+    pdf_path: str | Path,
+    caption: str,
+    file_name: str = "ticket.pdf",
+    client: httpx.AsyncClient | None = None,
+) -> SentRef | None:
+    """Send a PDF document through Evolution API's /message/sendMedia/{instance}.
+
+    Returns the sent message's (jid, id) so it can be deleted later, or None if the gateway
+    did not report one.
+    """
+    try:
+        encoded = base64.b64encode(Path(pdf_path).read_bytes()).decode("ascii")
+    except OSError as exc:
+        raise WhatsAppError(f"Ticket file unavailable: {exc}")
+    payload = {
+        "number": normalize_phone(phone),
+        "mediatype": "document",
+        "mimetype": "application/pdf",
+        "caption": caption,
+        "media": encoded,
+        "fileName": file_name,
+    }
+    resp = await _gateway_call("POST", "/message/sendMedia", payload, client)
+    try:
+        key = resp.json().get("key") or {}
+        if key.get("id") and key.get("remoteJid"):
+            return SentRef(key["remoteJid"], key["id"])
+    except (ValueError, AttributeError):
+        pass
+    log.warning("sendMedia response had no message key; this message cannot be auto-deleted")
+    return None
+
+
+async def delete_whatsapp_message(remote_jid: str, message_id: str,
+                                  client: httpx.AsyncClient | None = None) -> None:
+    """Delete a message we sent "for everyone" (Evolution: /chat/deleteMessageForEveryone)."""
+    await _gateway_call("DELETE", "/chat/deleteMessageForEveryone",
+                        {"id": message_id, "remoteJid": remote_jid, "fromMe": True}, client)
