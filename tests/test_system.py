@@ -801,146 +801,186 @@ def message_status(attendee_id):
         return {m.message_id: m.status for m in db.query(SentMessage).filter_by(attendee_id=attendee_id)}
 
 
-def test_admitting_deletes_the_ticket_message(admin, doorman, event_id, wa):
-    ada = seeded_event(admin, event_id)                                  # Ada has 2 tickets
+def sent_rows(attendee_id):
+    from app.models import SentMessage
+    with SessionLocal() as db:
+        return {m.message_id: m for m in db.query(SentMessage).filter_by(attendee_id=attendee_id)}
+
+
+def ticket_tokens(attendee_id):
+    with SessionLocal() as db:
+        return [t.claim_token for t in db.get(Attendee, attendee_id).tickets]
+
+
+def toggle(doorman, attendee_id):
+    return doorman.post(f"/attendees/{attendee_id}/toggle", headers={"HX-Request": "true"})
+
+
+def test_admitting_and_resending_delete_nothing(admin, doorman, event_id, wa):
+    ada = seeded_event(admin, event_id)
     doorman.post(f"/attendees/{ada}/whatsapp")
-    assert wa["sent"] == ["MSG1", "MSG2"]
-    # tapping WhatsApp admits, but its own freshly sent messages are not deleted
-    assert message_status(ada) == {"MSG1": "sent", "MSG2": "sent"} and wa["deleted"] == []
-    doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})       # undo
-    r = doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})   # admit again
-    assert "deleted from the guest" in r.headers["HX-Trigger"]
+    doorman.post(f"/attendees/{ada}/whatsapp")
+    doorman.post(f"/attendees/{ada}/qr")
+    assert wa["sent"] == ["MSG1", "MSG2", "MSG3", "MSG4"] and wa["deleted"] == []
+
+
+def test_unadmit_deletes_that_orders_message_and_disables_its_qr_link(admin, doorman, event_id, wa):
+    ada = seeded_event(admin, event_id)                        # Ada has 2 tickets
+    doorman.post(f"/attendees/{ada}/whatsapp")                 # admits + sends MSG1, MSG2
+    old = ticket_tokens(ada)
+    assert TestClient(app).get(f"/tickets/claim/{old[0]}/ticket.pdf").status_code == 200
+    r = toggle(doorman, ada)                                   # un-admit
+    assert "Waiting" in r.text and "deleted from WhatsApp" in r.headers["HX-Trigger"]
     assert wa["deleted"] == ["MSG1", "MSG2"]
-    assert message_status(ada) == {"MSG1": "deleted", "MSG2": "deleted"}
+    assert {m.status for m in sent_rows(ada).values()} == {"deleted"}
+    anon = TestClient(app)
+    for token in old:                                          # the old QR / links are dead
+        assert anon.get(f"/tickets/claim/{token}/ticket.pdf").status_code == 404
+        assert anon.get(f"/tickets/claim/{token}").status_code == 404
+    new = ticket_tokens(ada)
+    assert not set(new) & set(old)
+    qr = doorman.post(f"/attendees/{ada}/qr")                  # a fresh QR works again
+    assert new[0] in qr.text and anon.get(f"/tickets/claim/{new[0]}/ticket.pdf").status_code == 200
+    assert toggle(doorman, ada).status_code == 200             # admitting afterwards deletes nothing more
+    assert wa["deleted"] == ["MSG1", "MSG2"]
 
 
-def test_qr_admission_and_resend_delete_older_messages(admin, doorman, event_id, wa):
-    ada = seeded_event(admin, event_id)
-    doorman.post(f"/attendees/{ada}/whatsapp")                           # MSG1, MSG2
-    doorman.post(f"/attendees/{ada}/whatsapp")                           # resend supersedes the first pair
-    assert wa["deleted"] == ["MSG1", "MSG2"] and wa["sent"] == ["MSG1", "MSG2", "MSG3", "MSG4"]
-    r = doorman.post(f"/attendees/{ada}/qr")
-    assert "toast" in r.headers["HX-Trigger"] and wa["deleted"] == ["MSG1", "MSG2", "MSG3", "MSG4"]
-    assert set(message_status(ada).values()) == {"deleted"}
+def test_unadmit_only_touches_that_order_even_if_the_phone_is_shared(admin, doorman, event_id, wa):
+    guests = [{"name": "Order One", "phone": "0509999999", "adult_count": 1},
+              {"name": "Order Two", "phone": "0509999999", "adult_count": 1}]
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(guests).encode())})
+    admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(2))})
+    with SessionLocal() as db:
+        ids = {a.name: a.id for a in db.query(Attendee).filter_by(event_id=event_id)}
+    doorman.post(f"/attendees/{ids['Order One']}/whatsapp")    # MSG1
+    doorman.post(f"/attendees/{ids['Order Two']}/whatsapp")    # MSG2, both admitted
+    two_token = ticket_tokens(ids["Order Two"])[0]
+    toggle(doorman, ids["Order One"])                          # un-admit order one only
+    assert wa["deleted"] == ["MSG1"]
+    assert sent_rows(ids["Order Two"])["MSG2"].status == "sent"                       # untouched
+    assert TestClient(app).get(f"/tickets/claim/{two_token}/ticket.pdf").status_code == 200
+    assert "Admitted" in doorman.get(f"/events/{event_id}/search", params={"q": "Order Two"}).text
 
 
-def test_failed_delete_is_reported_and_retried_later(admin, doorman, event_id, wa):
+def test_failed_unadmit_deletion_is_retried_later(admin, doorman, event_id, wa):
+    import asyncio
+    from datetime import timedelta
+    from app.main import cleanup_due_messages
+    from app.models import utcnow
     ada = seeded_event(admin, event_id)
     doorman.post(f"/attendees/{ada}/whatsapp")
-    doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})        # undo
     wa["fail_delete"] = True
-    r = doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})
-    assert "Admitted" in r.text and "could not be deleted" in r.headers["HX-Trigger"]
-    assert set(message_status(ada).values()) == {"sent"}
+    r = toggle(doorman, ada)
+    assert "Waiting" in r.text and "could not be deleted yet" in r.headers["HX-Trigger"]
+    assert {m.status for m in sent_rows(ada).values()} == {"sent"}
+    assert ticket_tokens(ada)                                                         # QR link is dead regardless
     wa["fail_delete"] = False
-    import asyncio
-    from datetime import timedelta
-    from app.main import cleanup_expired_messages
-    from app.models import SentMessage, utcnow
-    with SessionLocal() as db:
-        for m in db.query(SentMessage).filter_by(attendee_id=ada):
-            m.sent_at = utcnow() - timedelta(hours=25)
-        db.commit()
-    assert asyncio.run(cleanup_expired_messages(force=True)) == 2
-    assert set(message_status(ada).values()) == {"deleted"}
+    # the failed deletion is not retried immediately (no hammering) ...
+    assert asyncio.run(cleanup_due_messages()) == 0
+    # ... a retry is scheduled 30-90 minutes ahead (random), and then it succeeds
+    from app.models import SentMessage
+    for m in sent_rows(ada).values():
+        assert timedelta(minutes=29) <= m.delete_at - utcnow() <= timedelta(minutes=91)
+    assert asyncio.run(cleanup_due_messages(now=utcnow() + timedelta(hours=2))) == 2
+    assert {m.status for m in sent_rows(ada).values()} == {"deleted"}
 
 
-def test_messages_are_auto_deleted_after_24_hours(admin, doorman, event_id, wa, monkeypatch):
+def test_messages_are_scheduled_12_to_36_hours_after_the_event(admin, doorman, event_id, wa):
+    from datetime import datetime, timedelta
+    ada = seeded_event(admin, event_id)       # event_date: 2030-01-01 19:00 Israel time (UTC+2)
+    doorman.post(f"/attendees/{ada}/whatsapp")
+    end_utc = datetime(2030, 1, 1, 19, 0) - timedelta(hours=2) + timedelta(hours=config.EVENT_DURATION_HOURS)
+    for m in sent_rows(ada).values():
+        assert end_utc + timedelta(hours=12) <= m.delete_at <= end_utc + timedelta(hours=36)
+
+
+def test_event_end_conversion_and_random_spread():
+    from datetime import datetime, timedelta
+    from app.main import event_end_utc, schedule_delete_at
+    from app.models import Event
+    ev = Event(name="x", location="y", event_date=datetime(2030, 7, 1, 20, 0))      # summer: UTC+3
+    assert event_end_utc(ev) == datetime(2030, 7, 1, 17, 0) + timedelta(hours=config.EVENT_DURATION_HOURS)
+    times = [schedule_delete_at(ev) for _ in range(50)]
+    assert len({t for t in times}) > 40                                              # spread out, not one instant
+    lo, hi = event_end_utc(ev) + timedelta(hours=12), event_end_utc(ev) + timedelta(hours=36)
+    assert all(lo <= t <= hi for t in times)
+    past = Event(name="x", location="y", event_date=datetime(2020, 1, 1, 20, 0))      # already over: counts from now
+    from app.models import utcnow
+    assert schedule_delete_at(past) >= utcnow() + timedelta(hours=12)
+
+
+def test_cleanup_deletes_due_messages_only_and_gives_up_after_47h(admin, doorman, event_id, wa, monkeypatch):
     import asyncio
     from datetime import timedelta
-    from app.main import cleanup_expired_messages
+    from app.main import cleanup_due_messages
     from app.models import SentMessage, utcnow
+    monkeypatch.setattr(config, "WHATSAPP_DELETE_GAP", (0.0, 0.0))
     ada = seeded_event(admin, event_id)
-    doorman.post(f"/attendees/{ada}/whatsapp")                           # MSG1 + MSG2, guest not "re-admitted"
+    doorman.post(f"/attendees/{ada}/whatsapp")                        # event in 2030: nothing is due
+    assert asyncio.run(cleanup_due_messages()) == 0 and wa["deleted"] == []
+    rows = sent_rows(ada)
+    m1, m2 = rows["MSG1"], rows["MSG2"]
     with SessionLocal() as db:
-        m1, m2 = db.query(SentMessage).filter_by(attendee_id=ada).order_by(SentMessage.id).all()
-        m1.sent_at = utcnow() - timedelta(hours=23)                      # not due yet
-        m2.sent_at = utcnow() - timedelta(hours=24, minutes=1)           # due
+        db.get(SentMessage, m1.id).delete_at = utcnow() - timedelta(minutes=5)      # due
+        db.get(SentMessage, m2.id).delete_at = utcnow() + timedelta(hours=5)        # later
         db.commit()
-    assert asyncio.run(cleanup_expired_messages(force=True)) == 1
-    st = message_status(ada)
-    assert st[m1.message_id] == "sent" and st[m2.message_id] == "deleted"
-    with SessionLocal() as db:                                           # too old for WhatsApp: give up
-        db.get(SentMessage, m1.id).sent_at = utcnow() - timedelta(hours=47)
+    assert asyncio.run(cleanup_due_messages()) == 1 and wa["deleted"] == ["MSG1"]
+    with SessionLocal() as db:                                         # too old for WhatsApp to delete
+        row = db.get(SentMessage, m2.id)
+        row.sent_at, row.delete_at = utcnow() - timedelta(hours=48), utcnow() - timedelta(minutes=1)
         db.commit()
-    assert asyncio.run(cleanup_expired_messages(force=True)) == 0
-    assert message_status(ada)[m1.message_id] == "expired"
+    assert asyncio.run(cleanup_due_messages()) == 0
+    assert sent_rows(ada)["MSG2"].status == "expired"
+
+
+def test_legacy_messages_without_schedule_get_one(admin, doorman, event_id, wa):
+    import asyncio
+    from app.main import cleanup_due_messages
+    from app.models import SentMessage
+    ada = seeded_event(admin, event_id)
+    doorman.post(f"/attendees/{ada}/whatsapp")
+    with SessionLocal() as db:
+        db.query(SentMessage).filter_by(attendee_id=ada).update({"delete_at": None})
+        db.commit()
+    asyncio.run(cleanup_due_messages())
+    assert all(m.delete_at is not None for m in sent_rows(ada).values())
 
 
 def test_deletion_switches(admin, doorman, event_id, wa, monkeypatch):
     import asyncio
     from datetime import timedelta
-    from app.main import cleanup_expired_messages
+    from app.main import cleanup_due_messages
     from app.models import SentMessage, utcnow
     ada = seeded_event(admin, event_id)
-    monkeypatch.setattr(config, "WHATSAPP_DELETE_ON_ADMIT", False)
     doorman.post(f"/attendees/{ada}/whatsapp")
-    doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})        # undo
-    doorman.post(f"/attendees/{ada}/toggle", headers={"HX-Request": "true"})        # admit: no deletion
-    assert wa["deleted"] == []
-    monkeypatch.setattr(config, "WHATSAPP_AUTO_DELETE_HOURS", 0)
+    monkeypatch.setattr(config, "WHATSAPP_DELETE_ON_UNADMIT", False)
+    r = toggle(doorman, ada)
+    assert wa["deleted"] == [] and "QR link was disabled" in r.headers["HX-Trigger"]
+    monkeypatch.setattr(config, "WHATSAPP_DELETE_AFTER_EVENT", False)
     with SessionLocal() as db:
-        for m in db.query(SentMessage):
-            m.sent_at = utcnow() - timedelta(hours=30)
+        db.query(SentMessage).update({"delete_at": utcnow() - timedelta(hours=1)})
         db.commit()
-    assert asyncio.run(cleanup_expired_messages(force=True)) == 0 and wa["deleted"] == []
+    assert asyncio.run(cleanup_due_messages()) == 0 and wa["deleted"] == []
 
 
-def test_removing_a_guest_pulls_their_messages(admin, doorman, event_id, wa):
+def test_removing_an_order_pulls_only_its_messages(admin, doorman, event_id, wa):
     ada = seeded_event(admin, event_id)
-    doorman.post(f"/attendees/{ada}/whatsapp")
+    with SessionLocal() as db:
+        alan = [a.id for a in db.query(Attendee).filter_by(event_id=event_id, name="Alan Turing")][0]
+    doorman.post(f"/attendees/{ada}/whatsapp")                         # MSG1, MSG2
+    doorman.post(f"/attendees/{alan}/whatsapp")                        # MSG3, MSG4
     admin.post(f"/attendees/{ada}/delete")
-    assert wa["deleted"] == ["MSG1", "MSG2"]
+    assert wa["deleted"] == ["MSG1", "MSG2"] and sent_rows(alan)["MSG3"].status == "sent"
 
 
-def test_shared_phone_orders_are_never_deleted(admin, doorman, event_id, wa):
-    import asyncio
-    from datetime import timedelta
-    from app.main import cleanup_expired_messages
-    from app.models import SentMessage, utcnow
-    guests = [{"name": "First Order", "phone": "0509999999", "adult_count": 1},
-              {"name": "Second Order", "phone": "0509999999", "adult_count": 1},
-              {"name": "Solo", "phone": "0508888888", "adult_count": 1}]
-    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(guests).encode())})
-    admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(3))})
-    with SessionLocal() as db:
-        ids = {a.name: a.id for a in db.query(Attendee).filter_by(event_id=event_id)}
-    for name in ids:
-        doorman.post(f"/attendees/{ids[name]}/whatsapp")
-    for name in ("First Order", "Solo"):                                   # admit them
-        doorman.post(f"/attendees/{ids[name]}/toggle", headers={"HX-Request": "true"})   # already admitted -> undo
-        doorman.post(f"/attendees/{ids[name]}/toggle", headers={"HX-Request": "true"})   # admit
-    assert message_status(ids["First Order"]) == {"MSG1": "sent"}          # shared phone: kept
-    assert message_status(ids["Solo"]) == {"MSG3": "deleted"}              # single order: deleted
-    with SessionLocal() as db:
-        for m in db.query(SentMessage):
-            m.sent_at = utcnow() - timedelta(hours=30)
-        db.commit()
-    asyncio.run(cleanup_expired_messages(force=True))                      # the timer skips them too
-    assert message_status(ids["Second Order"]) == {"MSG2": "sent"} and message_status(ids["First Order"]) == {"MSG1": "sent"}
-    assert wa["deleted"] == ["MSG3"]
-
-
-def test_cleanup_only_runs_when_an_event_was_in_the_last_48_hours(admin, doorman, event_id, wa):
-    import asyncio
-    from datetime import timedelta
-    from app.main import cleanup_expired_messages
-    from app.models import Event, SentMessage, utcnow
-    ada = seeded_event(admin, event_id)
-    doorman.post(f"/attendees/{ada}/whatsapp")
-    with SessionLocal() as db:
-        for m in db.query(SentMessage).filter_by(attendee_id=ada):
-            m.sent_at = utcnow() - timedelta(hours=30)
-        db.commit()
-    assert asyncio.run(cleanup_expired_messages()) == 0 and wa["deleted"] == []      # event is in 2030: no WhatsApp calls
-    with SessionLocal() as db:
-        db.get(Event, event_id).event_date = utcnow() - timedelta(hours=20)
-        db.commit()
-    assert asyncio.run(cleanup_expired_messages()) == 2 and wa["deleted"] == ["MSG1", "MSG2"]
-    with SessionLocal() as db:                                                       # 3 days after the event: dormant
-        db.get(Event, event_id).event_date = utcnow() - timedelta(days=3)
-        db.commit()
-
-
-def test_cleanup_cadence_defaults_are_infrequent():
-    assert config.WHATSAPP_CLEANUP_INTERVAL_HOURS >= 12 and config.WHATSAPP_CLEANUP_WINDOW_HOURS == 48
+def test_migration_adds_delete_at(tmp_path):
+    from sqlalchemy import create_engine, text
+    from app.database import migrate
+    eng = create_engine(f"sqlite:///{tmp_path}/old2.db")
+    with eng.begin() as c:
+        c.execute(text("CREATE TABLE sent_messages (id INTEGER PRIMARY KEY, event_id INTEGER, attendee_id INTEGER, "
+                       "remote_jid TEXT, message_id TEXT, sent_at DATETIME, status TEXT, attempts INTEGER, deleted_at DATETIME)"))
+    migrate(eng)
+    migrate(eng)
+    with eng.begin() as c:
+        c.execute(text("SELECT delete_at FROM sent_messages"))

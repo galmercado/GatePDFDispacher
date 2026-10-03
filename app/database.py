@@ -50,6 +50,10 @@ def get_db() -> Iterator[Session]:
 def migrate(bind: Engine) -> None:
     """Add columns introduced after the first release to pre-existing databases (SQLite)."""
     insp = inspect(bind)
+    if "sent_messages" in insp.get_table_names():
+        if "delete_at" not in {c["name"] for c in insp.get_columns("sent_messages")}:
+            with bind.begin() as conn:
+                conn.execute(text("ALTER TABLE sent_messages ADD COLUMN delete_at DATETIME"))
     if "attendees" not in insp.get_table_names():
         return
     cols = {c["name"] for c in insp.get_columns("attendees")}

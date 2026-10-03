@@ -119,4 +119,5 @@ class SentMessage(Base):
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     status: Mapped[str] = mapped_column(String(16), default="sent", index=True)  # sent | deleted | expired
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+    delete_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)  # scheduled removal
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

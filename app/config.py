@@ -38,17 +38,22 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
 DEFAULT_ADMIN_EMAIL = "admin@event.local"
 DEFAULT_ADMIN_PASSWORD = "admin1234"
 
-# Ticket messages are removed from WhatsApp ("delete for everyone") when the guest is admitted and, as a
-# safety net, this many hours after sending (0 disables the timer). WhatsApp only allows deleting for
-# everyone for roughly two days, so keep this well below 48.
-WHATSAPP_AUTO_DELETE_HOURS = float(os.getenv("WHATSAPP_AUTO_DELETE_HOURS", "24"))
-WHATSAPP_DELETE_ON_ADMIT = _bool("WHATSAPP_DELETE_ON_ADMIT", True)
-# The timer-based cleanup is deliberately infrequent (to look less like a bot to WhatsApp): it wakes up every
-# WHATSAPP_CLEANUP_INTERVAL_HOURS and only talks to WhatsApp if an event took place in the last
-# WHATSAPP_CLEANUP_WINDOW_HOURS.
-WHATSAPP_CLEANUP_INTERVAL_HOURS = max(1.0, float(os.getenv("WHATSAPP_CLEANUP_INTERVAL_HOURS", "12")))
-WHATSAPP_CLEANUP_WINDOW_HOURS = float(os.getenv("WHATSAPP_CLEANUP_WINDOW_HOURS", "48"))
-WHATSAPP_CLEANUP_STARTUP_DELAY = 300.0  # seconds after boot before the first check
+# Ticket messages sent over WhatsApp are removed with "delete for everyone":
+#  * immediately when an order is un-admitted (that order only), together with its QR link;
+#  * after the event: each message gets its own random deletion time between MIN and MAX hours after the
+#    event ended, so deletions are spread out and look spontaneous instead of one burst.
+# WhatsApp only allows deleting for everyone for about two days after sending, so messages sent long before
+# an event may no longer be deletable.
+WHATSAPP_DELETE_ON_UNADMIT = _bool("WHATSAPP_DELETE_ON_UNADMIT", True)
+WHATSAPP_DELETE_AFTER_EVENT = _bool("WHATSAPP_DELETE_AFTER_EVENT", True)
+WHATSAPP_DELETE_MIN_HOURS = float(os.getenv("WHATSAPP_DELETE_MIN_HOURS", "12"))
+WHATSAPP_DELETE_MAX_HOURS = max(WHATSAPP_DELETE_MIN_HOURS, float(os.getenv("WHATSAPP_DELETE_MAX_HOURS", "36")))
+EVENT_DURATION_HOURS = float(os.getenv("EVENT_DURATION_HOURS", "3"))   # event start + this = "event over"
+EVENT_TIMEZONE = os.getenv("EVENT_TIMEZONE", "Asia/Jerusalem")          # timezone the event dates are entered in
+WHATSAPP_DELETE_GAP = (3.0, 15.0)        # random pause (seconds) between two deletions
+WHATSAPP_RETRY_MINUTES = (30.0, 90.0)    # random wait before retrying a failed deletion
+WHATSAPP_CLEANUP_POLL_SECONDS = 600.0    # DB-only check for due messages; WhatsApp is contacted only for due ones
+WHATSAPP_CLEANUP_STARTUP_DELAY = 60.0
 WHATSAPP_DELETE_GIVE_UP_HOURS = 47.0
 
 MAX_PDF_BYTES = 200 * 1024 * 1024
