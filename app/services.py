@@ -358,7 +358,8 @@ def parse_rows(rows: list[dict], offset: int = 1, members: "MemberBook | None" =
         if members:   # organisation members: take the phone number from the members list when missing
             cat = data.CATEGORY_ALIASES.get(_norm_key(row.get("category", "")), str(row.get("category", "") or "").strip())
             found = members.lookup(str(row.get("name", "")))
-            if found and (not _phone_ok(row.get("phone")) or (members.override and cat == data.CATEGORIES[0])):
+            # a פלוס is somebody's guest: never give them a member's number
+            if found and cat != "פלוס" and (not _phone_ok(row.get("phone")) or (members.override and cat == data.CATEGORIES[0])):
                 row["phone"], filled = found, filled + 1
         if lenient_age and str(row.get("age", "") or "").strip():
             try:

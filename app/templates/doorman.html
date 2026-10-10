@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block title %}{{ event.name }}{% endblock %}
 {% block content %}
+<style>
+  /* the registration order number is only shown while searching, to verify the right guest */
+  .order-ref { display: none; }
+  #attendee-list[data-searching="true"] .order-ref { display: inline-flex; }
+</style>
 <div class="mb-3 flex items-center justify-between">
   <div class="min-w-0">
     <a href="/events" class="inline-flex items-center gap-1 text-sm text-slate-400 hover:text-white"><i class="ph ph-arrow-left"></i> Events</a>
@@ -15,7 +20,7 @@
 
 <div class="relative mb-4">
   <i class="ph ph-magnifying-glass pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-xl text-slate-500"></i>
-  <input type="search" name="q" autocomplete="off" autocapitalize="none" inputmode="search" placeholder="Search name or phone…"
+  <input type="search" name="q" autocomplete="off" autocapitalize="none" inputmode="search" placeholder="Search name, phone or order no.…"
          hx-get="/events/{{ event.id }}/search" hx-trigger="keyup changed delay:180ms, search"
          hx-target="#attendee-list" hx-indicator="#search-spinner"
          class="w-full rounded-2xl border border-slate-700 bg-slate-900 py-3.5 pl-12 pr-12 text-base text-white placeholder-slate-500 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-500/30">
@@ -33,6 +38,8 @@
 
 {% block scripts %}
 <script>
+  const searchBox = document.querySelector('input[name=q]'), guestList = document.getElementById('attendee-list');
+  searchBox.addEventListener('input', () => { guestList.dataset.searching = searchBox.value.trim() ? 'true' : 'false'; });
   const qrModal = document.getElementById('qr-modal');
   document.body.addEventListener('htmx:afterSwap', (e) => {
     if (e.detail.target.id === 'qr-content' && !qrModal.open) qrModal.showModal();

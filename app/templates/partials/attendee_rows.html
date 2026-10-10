@@ -12,6 +12,7 @@
         {% if a.adult_count %}<span dir="rtl" class="rounded-full bg-slate-800 px-2 py-0.5 text-slate-200"><i class="ph ph-ticket"></i> מבוגר ×{{ a.adult_count }}</span>{% endif %}
         {% if a.youth_count %}<span dir="rtl" class="rounded-full bg-slate-800 px-2 py-0.5 text-slate-200"><i class="ph ph-ticket"></i> נוער ×{{ a.youth_count }}</span>{% endif %}
         {% if not a.tickets %}<span class="rounded-full bg-rose-500/15 px-2 py-0.5 text-rose-300">No PDF</span>{% endif %}
+        {% if a.external_ref %}<span class="order-ref items-center gap-1 rounded-full border border-slate-700 px-2 py-0.5 text-slate-300" title="Registration order number"><i class="ph ph-hash"></i>{{ a.external_ref }}</span>{% endif %}
       </div>
       {% if a.notes %}<p class="mt-2 text-sm italic text-slate-400"><i class="ph ph-note"></i> {{ a.notes }}</p>{% endif %}
     </div>

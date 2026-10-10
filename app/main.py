@@ -499,7 +499,8 @@ def manage_ctx(db: Session, user: User, event: Event, **extra) -> dict:
                  .filter(Attendee.event_id == event.id).order_by(func.lower(Attendee.name), Attendee.id).all())
     return {"user": user, "event": event, "stats": compute_stats(db, event.id),
             "issues": load_issues(db, event.id), "has_cookie": bool(registration_cookie(db)), "members_count": db.query(Member).count(),
-            "registration_host": config.REGISTRATION_BASE_URL.removeprefix("https://"), "max_pdf_mb": config.MAX_PDF_BYTES // (1024 * 1024),
+            "registration_host": config.REGISTRATION_BASE_URL.removeprefix("https://"),
+            "registration_url": (config.REGISTRATION_BASE_URL + config.REGISTRATION_PATH.format(game_id=event.external_id)) if event.external_id else "", "max_pdf_mb": config.MAX_PDF_BYTES // (1024 * 1024),
             "max_list_mb": config.MAX_LIST_BYTES // (1024 * 1024), "ticket_files": tickets, "spare_pages": status["spare"], "warnings": warnings, "attendees": attendees, "groups": group_by_category(attendees),
             "categories": data.CATEGORIES, "messages": [], "errors": [], **extra}
 
@@ -546,8 +547,10 @@ def member_book(db: Session) -> MemberBook:
     return MemberBook(entries, override=linesmod.get_setting(db, "members_override_phone", "") == "1")
 
 
-def fill_member_phone(db: Session, name: str, phone: str) -> str:
+def fill_member_phone(db: Session, name: str, phone: str, category: str = "") -> str:
     if 7 <= len(re.sub(r"\D", "", phone or "")) <= 15:
+        return phone
+    if data.CATEGORY_ALIASES.get(category.strip(), category.strip()) == "פלוס":      # plus guests never get a member's number
         return phone
     return member_book(db).lookup(name) or phone
 
@@ -666,7 +669,7 @@ def fix_import_issue(
 ):
     issue = get_issue_or_404(db, issue_id)
     event = get_event_or_404(db, issue.event_id)
-    phone = fill_member_phone(db, name, phone)
+    phone = fill_member_phone(db, name, phone, category)
     form = dict(name=name, phone=phone, email=email, age=age, category=category,
                 adult_count=adult_count, youth_count=youth_count, notes=notes, external_ref=external_ref)
     item, errors = validate_attendee_form(**form)
@@ -828,7 +831,7 @@ def add_attendee(
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     event = get_event_or_404(db, event_id)
-    phone = fill_member_phone(db, name, phone)
+    phone = fill_member_phone(db, name, phone, category)
     item, errors = validate_attendee_form(name=name, phone=phone, email=email, age=age, category=category,
                                           adult_count=adult_count, youth_count=youth_count, notes=notes)
     if item and is_duplicate(db, event.id, item):
@@ -898,7 +901,8 @@ def search_attendees(db: Session, event_id: int, q: str, limit: int = 300) -> li
     )
     q = q.strip()
     if q:
-        conds = [Attendee.name.ilike(f"%{like_escape(q)}%", escape="\\")]
+        conds = [Attendee.name.ilike(f"%{like_escape(q)}%", escape="\\"),
+                 Attendee.external_ref.like(f"%{like_escape(q)}%", escape="\\")]       # the registration order number
         digits = "".join(c for c in q if c.isdigit())
         if digits:
             conds.append(Attendee.phone.like(f"%{digits}%"))

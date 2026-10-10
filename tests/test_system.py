@@ -1833,9 +1833,11 @@ def test_members_page_and_retrying_waiting_rows(admin, doorman, event_id):
     assert "Added 2, updated 0, 1 already up to date." in r.text and "Line 3" in r.text                      # header skipped, bad line reported
     assert doorman.post("/members/import", data={"text": "a, 0501234567"}).status_code == 403
     r = admin.post(f"/events/{event_id}/import-issues/retry")                                             # the waiting rows now pass
-    assert "Added 3 waiting guest(s). 3 phone number(s) came from the Members list." in r.text and "need fixing" not in r.text
+    assert "Added 2 waiting guest(s). 2 phone number(s) came from the Members list." in r.text
+    assert "1 row(s) still need fixing" in r.text                                                          # the plus never gets a member number
     with SessionLocal() as db:
-        assert db.query(Attendee).filter_by(event_id=event_id).count() == 7
+        assert db.query(Attendee).filter_by(event_id=event_id).count() == 6
+        assert db.query(Attendee).filter_by(event_id=event_id, name="נועם פלוס").count() == 0
         g = db.query(Attendee).filter_by(event_id=event_id, name="אבי לוי").one()
         assert (g.phone, g.category, g.external_ref, g.adult_count) == ("972521000001", "חבר ארגון", "11111111", 2)
     form = {"name": "דוד חדש", "phone": "", "category": "חבר ארגון", "adult_count": "1", "youth_count": "0"}
@@ -1886,3 +1888,56 @@ def test_send_to_gate_bookmarklet_and_receiver(admin, doorman, event_id):
     assert admin.post("/registration/receive", json={**body, "event_id": 99999}).status_code == 404
     assert admin.post("/registration/receive", json={"event_id": event_id, "game_id": "1", "rows": [{"c": "", "t": ["a", "b"]}]}).status_code == 422
     assert admin.post("/registration/receive", json={"event_id": event_id}).status_code == 422
+
+
+def test_plus_guests_never_get_a_members_number():
+    from app.services import MemberBook
+    book = MemberBook([("נועם פלוס", "972521000009"), ("רן שלום", "972521000002")])      # the plus' own name is in the book, too
+    res = services.parse_registration_html(site_html().encode(), members=book)
+    assert [i.row["name"] for i in res.issues if i.row["category"] == "פלוס"] == ["נועם פלוס"]
+    assert any(v.name == "רן שלום" and v.phone == "972521000002" for v in res.valid)         # the joiner still gets his
+
+
+def test_plus_stays_blank_when_added_by_hand(admin, event_id):
+    admin.post("/members", data={"name": "פלוס ידני", "phone": "054-3000003"})
+    form = {"name": "פלוס ידני", "phone": "", "category": "פלוס", "adult_count": "1", "youth_count": "0"}
+    assert admin.post(f"/events/{event_id}/attendees", data=form).status_code == 422
+    assert admin.post(f"/events/{event_id}/attendees", data={**form, "category": "חבר ארגון"}).status_code == 200
+
+
+def test_order_number_is_hidden_until_searching(admin, doorman, event_id):
+    admin.post(f"/events/{event_id}/registration/upload", data={"html": site_html()})
+    page = doorman.get(f"/events/{event_id}/door").text
+    assert '#attendee-list[data-searching="true"] .order-ref { display: inline-flex; }' in page and ".order-ref { display: none; }" in page
+    assert 'class="order-ref' in page and ">44444441<" in page                           # in the DOM (hidden by CSS), shown while searching
+    assert "searchBox.addEventListener('input'" in page
+    for q in ("44444441", "4444444"):                                                    # search by the order number
+        r = doorman.get(f"/events/{event_id}/search", params={"q": q}).text
+        assert "דנה כרמל" in r and ">44444441<" in r
+    only = doorman.get(f"/events/{event_id}/search", params={"q": "44444443"}).text
+    assert "יוסי אפל" in only and "דנה כרמל" not in only
+    mpage = admin.get(f"/events/{event_id}/manage").text
+    assert "order #44444441" in mpage and 'data-searching="false"' in mpage
+
+
+def test_pasted_page_without_classes_imports_the_same(admin, event_id):
+    """What the browser puts on the clipboard after Ctrl+A / Ctrl+C: no row classes, hidden bits already gone."""
+    import re as _re
+    pasted = _re.sub(r' class="[^"]*"', "", site_html())
+    pasted = _re.sub(r'<div[^>]*>נשמר</div>|<div[^>]*>לא התקבל נשמר</div>', "", pasted)
+    a = services.parse_registration_html(site_html().encode())
+    b = services.parse_registration_html(pasted.encode())
+    assert [(v.external_ref, v.name, v.category, v.adult_count, v.youth_count) for v in a.valid] == \
+           [(v.external_ref, v.name, v.category, v.adult_count, v.youth_count) for v in b.valid]
+    assert len(a.issues) == len(b.issues) == 3
+    r = admin.post(f"/events/{event_id}/registration/upload", data={"html": pasted})
+    assert "Saved page: Imported 4 guest(s)." in r.text
+
+
+def test_registration_section_offers_popup_and_paste(admin, event_id):
+    page = admin.get(f"/events/{event_id}/manage").text
+    assert "Enter the game ID above to continue" in page and 'id="open-reg"' not in page
+    admin.post(f"/events/{event_id}/registration/id", data={"external_id": "377"})
+    page = admin.get(f"/events/{event_id}/manage").text
+    assert 'id="open-reg"' in page and 'data-url="https://gate11.co.il/admin/page.php?id=ticketReservations&amp;gameId=377"' in page
+    assert 'id="paste-zone"' in page and "clipboardData.getData('text/html')" in page and "Send to Gate" in page
