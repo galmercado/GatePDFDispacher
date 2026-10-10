@@ -108,14 +108,26 @@ this feature was deployed can be deleted.
 
 ## Import from the registration system (gate11.co.il)
 
-On an event's **Manage** page: enter the registration system's **event ID** (`gameId`, e.g. 377) and press **Fetch & import**. The server downloads
-`https://gate11.co.il/admin/page.php?id=ticketReservations&gameId=<ID>`, finds the reservations table (Hebrew or English headers: שם / שם פרטי + שם משפחה,
-טלפון / נייד, דוא"ל, סוג, מבוגרים, נוער, כמות, גיל, הערות ...) and imports it exactly like a guest-list file: new guests are added, changed ones (ticket counts, type ...)
-are updated, bad rows go to the fix-or-skip panel, and unrecognised columns are listed. Run it again whenever the registration changes.
+On an event's **Manage** page, section *Import from the registration system*. Three ways, all ending in the same import:
 
-The registration site uses Google sign-in, which a server cannot perform for you, so the fetch uses **your browser session**: sign in there, open the page, copy the
-`Cookie` request header from the browser's developer tools (F12 -> Network) and paste it under *Session cookie* (stored on your server, never displayed again;
-repeat when it expires). No cookie? Use *Import a saved page*: save the page from your browser (HTML) and upload it, or paste the table HTML.
+1. **“Send to Gate” bookmark (recommended - nothing to copy):** drag the button to your bookmarks bar once. Then, signed in to the registration site with
+   Google as usual, open the game's reservations page and click the bookmark. A small window of this site opens, already knowing the game; pick the event
+   (it is preselected when the game id matches) and press *Import*. Your Google login never leaves the registration site; this site only receives the
+   table's text, and both sides check each other's origin. (A server cannot show or automate Google's sign-in for another site - this is the one-click equivalent.)
+2. **Saved page:** *Save page as...* (HTML) on the reservations page and upload it.
+3. **Session cookie (advanced):** paste the `Cookie` header once and use *Fetch & import* with the game id.
+
+What the import understands from the registration page: the section titles (חברי ארגון / מצטרפים / פלוסים / פתוח) become each guest's type; the repeated header
+rows, totals and spacer rows are ignored; מבוגר / נוער become the adult / youth tickets; הסעה > 0 is added to the notes; the site's default note "אתר ארגון" is dropped;
+the reservation id (מזהה) is kept, so **two orders with the same name and phone stay two guests** and a later import updates the same order even if its name or
+phone changed. An age that is not a number is left empty. New reservations are added, changed ones updated, rows with problems wait in the fix-or-skip panel.
+
+### Members phone book (חברי ארגון)
+
+Admins get a **Members** page (address-book icon): name + phone for each member (add one by one, paste lines, or upload .xlsx/.csv/.json). Whenever a reservation
+arrives **without a valid phone number** - registration import, files, manual entry - the number is filled in by matching the name (first/last name order and quotes don't
+matter; a name listed twice is never matched). Optionally the list's number is always used for members. After adding numbers, press **Retry waiting rows** on the
+event's fix-or-skip panel to import everything that was waiting for a phone number.
 
 ## WhatsApp lines (several numbers, fail-over)
 

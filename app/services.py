@@ -45,7 +45,12 @@ COLUMN_ALIASES = {
     "ticket_count": {"ticket_count", "ticket count", "tickets", "qty", "quantity", "count", "כרטיסים", "כמות", "כמות כרטיסים",
                      "מס כרטיסים", "מספר כרטיסים"},
     "notes": {"notes", "note", "comments", "notas", "הערות", "הערה"},
+    # the reservation's id in the registration system: lets a re-import find the same order even if its details changed
+    "external_ref": {"external_ref", "מזהה", "מזהה הזמנה", "מספר הזמנה", "order id", "reservation id", "external id", "ref"},
+    "transport": {"transport", "shuttle", "הסעה", "הסעות"},   # folded into the notes when > 0
 }
+# Columns of the registration site that carry nothing we store (not reported as "unrecognised")
+IGNORED_COLUMNS = {"id", "#", "פעולות", "actions", "שולם", "paid", "התקבל", "received", "מס", "מספר"}
 
 
 def _norm_key(key) -> str:
@@ -69,9 +74,13 @@ def canonicalize_row(row: dict) -> tuple[dict, list[str]]:
     for key, value in row.items():
         field = canonical_field(key)
         if field is None:
-            unknown.append(str(key))
+            if _norm_key(key) not in IGNORED_COLUMNS and str(key).strip():
+                unknown.append(str(key))
         else:
             out[field] = value
+    transport = str(out.pop("transport", "") or "").strip()
+    if transport not in ("", "0"):
+        out["notes"] = (str(out.get("notes", "") or "").strip() + f" הסעה: {transport}").strip()
     first, last = str(out.pop("first_name", "") or "").strip(), str(out.pop("last_name", "") or "").strip()
     if not str(out.get("name", "") or "").strip() and (first or last):      # "שם פרטי" + "שם משפחה" -> name
         out["name"] = f"{first} {last}".strip()
@@ -121,6 +130,7 @@ class AttendeeIn(BaseModel):
     youth_count: int = 0
     ticket_count: int = 0  # derived; as input it is a legacy "total" meaning adult tickets
     notes: str | None = None
+    external_ref: str | None = None
     # which keys the source row actually contained (so a re-import only updates those); not stored
     provided: frozenset[str] = Field(default=frozenset(), exclude=True)
 
@@ -143,6 +153,14 @@ class AttendeeIn(BaseModel):
         if not 8 <= len(phone) <= 15:
             raise ValueError("phone number is not a valid international number")
         return phone
+
+    @field_validator("external_ref", mode="before")
+    @classmethod
+    def _ref(cls, v):
+        v = re.sub(r"\s+", "", str(v)) if v is not None else ""
+        if len(v) > 32:
+            raise ValueError("reference is too long")
+        return v or None
 
     @field_validator("email", "notes", mode="before")
     @classmethod
@@ -253,6 +271,36 @@ def _rows_from_json(content: bytes) -> list[dict]:
     return data
 
 
+def name_keys(name: str) -> tuple[str, str]:
+    """(ordered key, order-insensitive key) of a person's name, ignoring case, quotes and spacing."""
+    tokens = [t for t in _norm_key(re.sub(r"[,]", " ", name)).split() if t]
+    return " ".join(tokens), " ".join(sorted(tokens))
+
+
+class MemberBook:
+    """Lookup of organisation members' phone numbers by name. Ambiguous names (two members, same name) match nobody."""
+
+    def __init__(self, entries: list[tuple[str, str]] = (), override: bool = False):
+        self.override = override
+        self._by_name: dict[str, str | None] = {}
+        self._by_tokens: dict[str, str | None] = {}
+        for name, phone in entries:
+            ordered, tokens = name_keys(name)
+            for table, key in ((self._by_name, ordered), (self._by_tokens, tokens)):
+                table[key] = phone if key not in table or table[key] == phone else None
+
+    def __bool__(self) -> bool:
+        return bool(self._by_name)
+
+    def lookup(self, name: str) -> str | None:
+        ordered, tokens = name_keys(name or "")
+        return self._by_name.get(ordered) or self._by_tokens.get(tokens)
+
+
+def _phone_ok(value) -> bool:
+    return 7 <= len(re.sub(r"\D", "", str(value or ""))) <= 15
+
+
 class RowIssue(NamedTuple):
     label: str            # "Row 7"
     row: dict             # the row's values as strings, ready to show in a form
@@ -263,6 +311,8 @@ class ParseResult(NamedTuple):
     valid: list[AttendeeIn]
     issues: list[RowIssue]
     ignored: list[str] = []   # column / key names that were not recognised (and therefore not imported)
+    filled: int = 0           # phone numbers taken from the members list
+    bad_ages: int = 0         # rows whose age was not a number and was ignored (lenient imports only)
 
 
 def _row_as_form(row: dict) -> dict:
@@ -278,7 +328,7 @@ def describe_validation_error(exc: ValidationError) -> list[str]:
             + e["msg"].removeprefix("Value error, ") for e in exc.errors()]
 
 
-def parse_guest_list(filename: str, content: bytes) -> ParseResult:
+def parse_guest_list(filename: str, content: bytes, members: "MemberBook | None" = None) -> ParseResult:
     """Parse an .xlsx/.json guest list. A file that cannot be read at all raises ImportValidationError;
     otherwise valid rows are returned and each bad row comes back as a RowIssue to fix or skip."""
     ext = Path(filename or "").suffix.lower()
@@ -290,19 +340,32 @@ def parse_guest_list(filename: str, content: bytes) -> ParseResult:
         raise ImportValidationError(["Unsupported file type: upload a .xlsx or .json file"])
     if not rows:
         raise ImportValidationError(["The file contains no guests"])
-    return parse_rows(rows, offset)
+    return parse_rows(rows, offset, members)
 
 
-def parse_rows(rows: list[dict], offset: int = 1) -> ParseResult:
+def parse_rows(rows: list[dict], offset: int = 1, members: "MemberBook | None" = None,
+               lenient_age: bool = False) -> ParseResult:
     """Validate rows (dicts keyed by column name/alias). Bad rows come back as RowIssue to fix or skip."""
     valid: list[AttendeeIn] = []
     issues: list[RowIssue] = []
+    filled = bad_ages = 0
     ignored: dict[str, None] = {}
     seen: set[tuple[str, str]] = set()
     for i, raw_row in enumerate(rows):
         label = f"Row {i + offset}"
         row, unknown = canonicalize_row(raw_row)
         ignored.update(dict.fromkeys(unknown))
+        if members:   # organisation members: take the phone number from the members list when missing
+            cat = data.CATEGORY_ALIASES.get(_norm_key(row.get("category", "")), str(row.get("category", "") or "").strip())
+            found = members.lookup(str(row.get("name", "")))
+            if found and (not _phone_ok(row.get("phone")) or (members.override and cat == data.CATEGORIES[0])):
+                row["phone"], filled = found, filled + 1
+        if lenient_age and str(row.get("age", "") or "").strip():
+            try:
+                float(str(row["age"]).strip().replace(",", "."))
+            except ValueError:
+                row.pop("age"), None
+                bad_ages += 1
         shown = _row_as_form(row)
         cleaned = {k: v for k, v in row.items() if v is not None and str(v).strip() != ""}
         try:
@@ -311,13 +374,14 @@ def parse_rows(rows: list[dict], offset: int = 1) -> ParseResult:
             issues.append(RowIssue(label, shown, describe_validation_error(exc)))
             continue
         item.provided = frozenset(cleaned)
-        key = (item.name.lower(), item.phone)
+        key = ("ref", item.external_ref) if item.external_ref else (item.name.lower(), item.phone)
         if key in seen:
-            issues.append(RowIssue(label, shown, [f"duplicate of an earlier row ({item.name}, {item.phone})"]))
+            what = f"reservation {item.external_ref}" if item.external_ref else f"{item.name}, {item.phone}"
+            issues.append(RowIssue(label, shown, [f"duplicate of an earlier row ({what})"]))
             continue
         seen.add(key)
         valid.append(item)
-    return ParseResult(valid, issues, list(ignored))
+    return ParseResult(valid, issues, list(ignored), filled, bad_ages)
 
 
 class ImportOutcome(NamedTuple):
@@ -335,25 +399,45 @@ def _fmt(value) -> str:
 
 
 def import_attendees(db: Session, event_id: int, items: list[AttendeeIn]) -> ImportOutcome:
-    """Add new guests and update existing ones (same name + phone) with whatever the file provides.
+    """Add new guests and update existing ones with whatever the source provides.
 
-    Only fields present in the source row are changed, so a row with just name + phone never resets
-    anything. Ticket counts follow adult/youth if given (a legacy 'tickets' total means adults).
+    A guest is recognised by its reservation id (`external_ref`, from the registration system) if the row has one -
+    so two orders with the same name and phone stay two guests - otherwise by name + phone. Only fields present in
+    the source row are changed, so a row with just name + phone never resets anything. Ticket counts follow
+    adult/youth if given (a legacy 'tickets' total means adults).
     """
-    existing = {(a.name.lower(), a.phone): a for a in
-                db.query(Attendee).filter(Attendee.event_id == event_id)}
+    existing = list(db.query(Attendee).filter(Attendee.event_id == event_id))
+    by_ref = {g.external_ref: g for g in existing if g.external_ref}
+    by_name: dict[tuple[str, str], Attendee] = {}
+    for g in existing:
+        by_name.setdefault((g.name.lower(), g.phone), g)
     added = updated = unchanged = 0
     changes: list[str] = []
     warnings: list[str] = []
     for item in items:
-        guest = existing.get((item.name.lower(), item.phone))
+        key = (item.name.lower(), item.phone)
+        guest = by_ref.get(item.external_ref) if item.external_ref else by_name.get(key)
+        diffs: list[str] = []
+        if guest is None and item.external_ref:
+            guest = by_name.get(key)                 # same person imported earlier without a reservation id: adopt it
+            if guest is not None and guest.external_ref:
+                guest = None                          # that one belongs to another reservation: this is a separate order
+            elif guest is not None:
+                guest.external_ref = item.external_ref
+                by_ref[item.external_ref] = guest
         if guest is None:
             guest = Attendee(event_id=event_id, **item.model_dump())
             db.add(guest)
-            existing[(item.name.lower(), item.phone)] = guest
+            by_name.setdefault(key, guest)
+            if item.external_ref:
+                by_ref[item.external_ref] = guest
             added += 1
             continue
-        diffs: list[str] = []
+        if item.external_ref and guest.external_ref == item.external_ref:     # identified by id: name/phone may have changed
+            for field in ("name", "phone"):
+                if getattr(item, field) != getattr(guest, field):
+                    diffs.append(f"{field} {_fmt(getattr(guest, field))}→{_fmt(getattr(item, field))}")
+                    setattr(guest, field, getattr(item, field))
         for field in ("email", "age", "category", "notes"):
             if field in item.provided and getattr(item, field) != getattr(guest, field):
                 diffs.append(f"{field} {_fmt(getattr(guest, field))}→{_fmt(getattr(item, field))}")
@@ -717,52 +801,112 @@ class RegistrationError(RuntimeError):
     pass
 
 
+class GridRow(NamedTuple):
+    cls: str            # the <tr> class attribute
+    cells: list[str]    # visible text of each cell
+
+
+_SECTION_CLASS = {"members": "חבר ארגון", "newcomers": "מצטרף", "plus": "פלוס", "public": "פתוח"}
+_SECTION_TEXT = {_norm_key(k): v for k, v in {**data.CATEGORY_ALIASES, **{c: c for c in data.CATEGORIES}}.items()}
+
+
 def _cell_text(el) -> str:
+    for hidden in el.xpath(".//*[contains(concat(' ', normalize-space(@class), ' '), ' hide ')]|.//script|.//style"):
+        hidden.drop_tree()          # e.g. the hidden "saved" confirmations next to checkboxes
     return " ".join(el.text_content().split())
 
 
-def extract_table(html: bytes | str) -> list[dict]:
-    """Find the reservations table in an HTML page and return its rows as dicts keyed by header text.
-
-    The best table is the one whose header row has the most recognisable column names (name, phone ...),
-    then the one with the most rows. Navigation/layout tables are ignored.
-    """
+def grid_from_html(html: bytes | str) -> list[GridRow]:
+    """The reservations table of an HTML page (the table with the most recognisable column names, then most rows)."""
+    import lxml.etree
     import lxml.html
 
     if not html or not html.strip():
         raise RegistrationError("The page is empty")
+    if isinstance(html, bytes):
+        try:                                   # UTF-8 unless the bytes say otherwise (a charset <meta> still works for the rest)
+            html = html.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
     try:
         doc = lxml.html.fromstring(html)
-    except (ValueError, lxml.etree.ParserError) as exc:
+    except ValueError:                         # str with an encoding declaration
+        doc = lxml.html.fromstring(html.encode("utf-8") if isinstance(html, str) else html)
+    except lxml.etree.ParserError as exc:
         raise RegistrationError(f"Could not read the page: {exc}")
-    best, best_score, seen_headers = None, (-1, -1), []
+    best, best_score = None, (-1, -1)
     for table in doc.xpath("//table"):
-        grid = [[_cell_text(c) for c in tr.xpath("./th|./td")] for tr in table.xpath(".//tr")]
-        grid = [r for r in grid if any(r)]
-        for hi, row in enumerate(grid[:6]):          # which of the first rows is the header?
-            known = sum(1 for c in row if canonical_field(c))
-            seen_headers.append(row)
-            score = (known, len(grid) - hi)
-            if known >= 2 and score > best_score:
-                best, best_score = (grid, hi), score
+        grid = [GridRow(tr.get("class") or "", [_cell_text(c) for c in tr.xpath("./th|./td")]) for tr in table.xpath(".//tr")]
+        grid = [g for g in grid if any(g.cells)]
+        known = max((sum(1 for c in g.cells if canonical_field(c)) for g in grid[:8]), default=0)
+        score = (known, len(grid))
+        if known >= 2 and score > best_score:
+            best, best_score = grid, score
     if best is None:
-        found = "; ".join(" | ".join(r)[:120] for r in seen_headers[:3]) or "no tables"
-        raise RegistrationError("No table with recognisable columns (name, phone, tickets ...) was found. "
-                                f"Headers seen: {found}")
-    grid, hi = best
-    headers = grid[hi]
-    rows = []
-    for row in grid[hi + 1:]:
-        if row == headers or len(row) < max(2, len(headers) // 2):      # repeated header (paging) / footer / spacer
+        raise RegistrationError("No table with recognisable columns (name, phone, tickets ...) was found on that page.")
+    return best
+
+
+def rows_from_grid(grid: list[GridRow]) -> list[dict]:
+    """Turn the table into rows keyed by header text.
+
+    The registration site groups reservations under section rows (חברי ארגון / מצטרפים / פלוסים / פתוח), repeats the
+    header row in every section and ends each with a totals row: sections become each guest's category, the
+    repeated headers, totals and spacers are dropped.
+    """
+    hi = max(range(min(8, len(grid))), key=lambda i: (sum(1 for c in grid[i].cells if canonical_field(c)), -i), default=0)
+    headers = grid[hi].cells
+    if sum(1 for c in headers if canonical_field(c)) < 2:
+        raise RegistrationError("No table with recognisable columns (name, phone, tickets ...) was found on that page.")
+    category: str | None = None
+    rows: list[dict] = []
+    for g in grid[hi + 1:]:
+        tokens = g.cls.split()
+        nonempty = [c for c in g.cells if c]
+        if not nonempty or any(t.startswith(("section-footer", "section-separator")) for t in tokens):
             continue
-        rows.append({h: (row[i] if i < len(row) else "") for i, h in enumerate(headers) if h})
+        if g.cells == headers or sum(1 for c in g.cells if canonical_field(c)) >= max(3, len(nonempty) - 1):
+            continue                                                   # repeated header row
+        is_title = any(t.startswith("section-title") for t in tokens)
+        if is_title or (len(nonempty) == 1 and _norm_key(nonempty[0]) in _SECTION_TEXT):
+            suffix = next((t.rsplit("-", 1)[1] for t in tokens if t.startswith("section-title-")), "")
+            category = _SECTION_CLASS.get(suffix) or _SECTION_TEXT.get(_norm_key(nonempty[0])) or nonempty[0]
+            continue
+        if re.match(r"^(סה[\"״']?כ|total)\b", nonempty[0].strip().lower()) or (len(nonempty) >= 2 and re.match(r"^(סה[\"״']?כ|total)\b", nonempty[1].strip().lower())):
+            continue                                                   # totals row
+        if len(g.cells) < max(2, len(headers) // 2):
+            continue
+        row = {h: (g.cells[i] if i < len(g.cells) else "") for i, h in enumerate(headers) if h}
+        has_category = any(canonical_field(k) == "category" and v.strip() for k, v in row.items())
+        if category and not has_category:
+            row["category"] = category
+        rows.append(row)
     if not rows:
         raise RegistrationError("The table has no reservations")
     return rows
 
 
-def parse_registration_html(html: bytes | str) -> ParseResult:
-    return parse_rows(extract_table(html), offset=1)
+REGISTRATION_BOILERPLATE_NOTES = {"אתר ארגון"}      # the registration site's default note ("organisation website")
+
+
+def _tidy_registration_rows(rows: list[dict]) -> list[dict]:
+    for row in rows:
+        for key, value in list(row.items()):
+            if canonical_field(key) == "notes" and str(value).strip() in REGISTRATION_BOILERPLATE_NOTES:
+                row[key] = ""
+    return rows
+
+
+def extract_table(html: bytes | str) -> list[dict]:
+    return rows_from_grid(grid_from_html(html))
+
+
+def parse_registration_html(html: bytes | str, members: "MemberBook | None" = None) -> ParseResult:
+    return parse_rows(_tidy_registration_rows(extract_table(html)), offset=1, members=members, lenient_age=True)
+
+
+def parse_registration_grid(grid: list[GridRow], members: "MemberBook | None" = None) -> ParseResult:
+    return parse_rows(_tidy_registration_rows(rows_from_grid(grid)), offset=1, members=members, lenient_age=True)
 
 
 async def fetch_registration_page(game_id: str, cookie: str, client: httpx.AsyncClient | None = None) -> bytes:
@@ -799,3 +943,45 @@ async def fetch_registration_page(game_id: str, cookie: str, client: httpx.Async
     if b"<table" not in lowered and (b"accounts.google.com" in lowered or b'type="password"' in lowered):
         raise RegistrationError("The registration site showed a sign-in page - the session cookie has expired.")
     return body
+
+
+# --------------------------------------------------------------------------- members phone book
+
+def parse_member_text(text: str) -> list[tuple[str, str]]:
+    """Lines like 'name, phone' / 'phone<TAB>name' (any order, comma/tab/semicolon separated) -> (name, raw phone)."""
+    pairs = []
+    for line in text.splitlines():
+        parts = [p.strip() for p in re.split(r"[\t,;|]+", line) if p.strip()]
+        if not parts:
+            continue
+        phone = next((p for p in parts if len(re.sub(r"\D", "", p)) >= 7), "")
+        name = " ".join(p for p in parts if p != phone)
+        if not phone and all(canonical_field(p) for p in parts):      # a header line such as "שם, טלפון"
+            continue
+        pairs.append((name, phone))
+    return pairs
+
+
+def parse_member_file(filename: str, content: bytes) -> list[tuple[str, str]]:
+    """.xlsx / .csv / .json with name + phone columns (aliases and Hebrew headers accepted) -> (name, raw phone)."""
+    ext = Path(filename or "").suffix.lower()
+    if ext == ".json":
+        rows = _rows_from_json(content)
+    elif ext in (".xlsx", ".csv"):
+        try:
+            df = (pd.read_excel(io.BytesIO(content), engine="openpyxl", dtype=str) if ext == ".xlsx"
+                  else pd.read_csv(io.BytesIO(content), dtype=str, encoding="utf-8-sig"))
+        except Exception as exc:
+            raise ImportValidationError([f"Could not read the file: {exc}"])
+        rows = df.fillna("").to_dict(orient="records")
+    elif ext in (".txt", ".tsv", ""):
+        return parse_member_text(content.decode("utf-8-sig", errors="replace"))
+    else:
+        raise ImportValidationError(["Unsupported file type: upload .xlsx, .csv, .json or a text file"])
+    pairs = []
+    for row in rows:
+        canon, _ = canonicalize_row(row)
+        pairs.append((str(canon.get("name", "")).strip(), str(canon.get("phone", "")).strip()))
+    if not pairs:
+        raise ImportValidationError(["The file contains no rows"])
+    return pairs

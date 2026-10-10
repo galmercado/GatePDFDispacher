@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Members phone book{% endblock %}
+{% block content %}
+{% set field = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white outline-none focus:border-brand-400" %}
+{% set label = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" %}
+<a href="/events" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-400 hover:text-white"><i class="ph ph-arrow-left"></i> Events</a>
+<h1 class="text-2xl font-bold text-white">חברי ארגון <span class="text-base font-normal text-slate-500">· members phone book ({{ members|length }})</span></h1>
+<p class="mb-4 mt-1 text-sm text-slate-400">Put a member's name and phone number here once. Whenever a reservation comes in <b>without a valid phone number</b> (imports from the registration system, files, manual entry), the number is filled in automatically by matching the name (first/last name order and quotes don't matter; a name that appears twice is never matched).</p>
+
+{% for m in messages %}<div class="mb-3 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200" role="status"><i class="ph-fill ph-check-circle"></i> {{ m }}</div>{% endfor %}
+{% if errors %}<div class="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert"><ul class="list-inside list-disc">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+
+<section class="mb-4 grid gap-4 rounded-2xl border border-slate-800 bg-slate-900 p-4 sm:grid-cols-2">
+  <form method="post" action="/members" class="grid gap-2">
+    <h2 class="font-semibold text-white"><i class="ph ph-user-plus text-brand-400"></i> Add a member</h2>
+    <div><label class="{{ label }}">Name</label><input name="name" required dir="auto" class="{{ field }}"></div>
+    <div><label class="{{ label }}">Phone</label><input name="phone" required inputmode="tel" placeholder="052-1234567" class="{{ field }}"></div>
+    <div><label class="{{ label }}">Notes (optional)</label><input name="notes" dir="auto" class="{{ field }}"></div>
+    <button class="rounded-xl bg-brand-500 py-2.5 font-semibold text-white hover:bg-brand-600">Add</button>
+  </form>
+  <form method="post" action="/members/import" enctype="multipart/form-data" class="grid gap-2">
+    <h2 class="font-semibold text-white"><i class="ph ph-table text-brand-400"></i> Add many at once</h2>
+    <textarea name="text" rows="4" dir="auto" placeholder="one per line:&#10;דנה לוי, 052-1111111&#10;יוסי כהן  053-3333333" class="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white"></textarea>
+    <input type="file" name="file" accept=".xlsx,.csv,.json,.txt,.tsv" class="rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-3 file:py-2 file:text-slate-200">
+    <button class="rounded-xl bg-slate-800 py-2.5 font-semibold text-white hover:bg-slate-700">Import</button>
+    <p class="text-xs text-slate-500">Paste lines (name + phone, any order) or upload .xlsx/.csv/.json with name and phone columns. Existing names get the new number.</p>
+  </form>
+</section>
+
+<form method="post" action="/members/settings" class="mb-4 flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-900 p-3 text-sm text-slate-300">
+  <input type="checkbox" name="override" id="override" {{ 'checked' if override }} class="h-5 w-5 rounded" onchange="this.form.submit()">
+  <label for="override">Always use this list's number for members (חבר ארגון), even when the registration has one</label>
+</form>
+
+<input type="search" id="mfilter" placeholder="Search name or phone…" class="mb-3 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-base text-white outline-none focus:border-brand-400">
+<div id="mlist" class="space-y-2">
+{% for m in members %}
+<details class="rounded-2xl border border-slate-800 bg-slate-900" data-search="{{ (m.name ~ ' ' ~ m.phone)|lower }}">
+  <summary class="flex cursor-pointer list-none items-center justify-between gap-3 p-3">
+    <span class="truncate font-medium text-white" dir="auto">{{ m.name }}</span>
+    <span class="shrink-0 text-sm text-slate-400" dir="ltr">+{{ m.phone }}</span>
+  </summary>
+  <form method="post" action="/members/{{ m.id }}/edit" class="grid gap-2 border-t border-slate-800 p-3 sm:grid-cols-3">
+    <input name="name" value="{{ m.name }}" required dir="auto" class="{{ field }}">
+    <input name="phone" value="{{ m.phone }}" required inputmode="tel" class="{{ field }}">
+    <input name="notes" value="{{ m.notes or '' }}" placeholder="Notes" dir="auto" class="{{ field }}">
+    <button class="rounded-xl bg-slate-800 py-2 font-semibold text-white hover:bg-slate-700">Save</button>
+    <button formaction="/members/{{ m.id }}/delete" formnovalidate onclick="return confirm('Remove this member from the list?')" class="rounded-xl border border-rose-500/40 py-2 font-semibold text-rose-300 hover:bg-rose-500/10 sm:col-span-2">Remove</button>
+  </form>
+</details>
+{% else %}
+<div class="rounded-2xl border border-dashed border-slate-700 p-8 text-center text-slate-400">No members yet.</div>
+{% endfor %}
+</div>
+<script>
+  document.getElementById('mfilter').addEventListener('input', (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll('#mlist > details').forEach((d) => { d.hidden = q && !d.dataset.search.includes(q); });
+  });
+</script>
+{% endblock %}

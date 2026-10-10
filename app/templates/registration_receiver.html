@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Receive registrations{% endblock %}
+{% block body %}
+<main class="mx-auto max-w-md px-4 py-6">
+  <h1 class="mb-1 flex items-center gap-2 text-xl font-bold text-white"><i class="ph-fill ph-paper-plane-tilt text-brand-400"></i> Send to Gate</h1>
+  <p id="status" class="mb-4 text-sm text-slate-400">Waiting for the table from the registration page…</p>
+
+  <div id="panel" class="hidden rounded-2xl border border-slate-800 bg-slate-900 p-4">
+    <p class="mb-3 text-sm text-slate-300">Received <b id="count">0</b> table rows from game <b id="game">?</b>.</p>
+    <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" for="event">Import into event</label>
+    <select id="event" dir="auto" class="mb-3 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white">
+      <option value="">- choose an event -</option>
+      {% for e in events %}<option value="{{ e.id }}" data-ext="{{ e.external_id or '' }}">{{ e.name }} · {{ e.event_date.strftime('%d/%m/%Y') }}{% if e.external_id %} (reg. #{{ e.external_id }}){% endif %}</option>{% endfor %}
+    </select>
+    <button id="go" class="flex w-full items-center justify-center gap-2 rounded-xl bg-brand-500 py-3 font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-download-simple"></i> Import</button>
+  </div>
+
+  <div id="result" class="mt-4 space-y-2 text-sm"></div>
+  <a id="open" href="#" class="mt-4 hidden items-center justify-center gap-2 rounded-xl bg-emerald-500/15 py-3 font-semibold text-emerald-300 hover:bg-emerald-500/25" target="_blank"><i class="ph-bold ph-arrow-square-out"></i> Open the event</a>
+</main>
+{% endblock %}
+{% block scripts %}
+<script>
+  const REG_ORIGIN = {{ reg_origin|tojson }};
+  let payload = null;
+  const $ = (id) => document.getElementById(id);
+  const note = (text, cls) => { const d = document.createElement('div'); d.className = 'rounded-lg border px-3 py-2 ' + cls; d.textContent = text; $('result').appendChild(d); };
+
+  window.addEventListener('message', (e) => {
+    if (e.origin !== REG_ORIGIN || !e.data || e.data.type !== 'gate-table' || !Array.isArray(e.data.rows)) return;
+    payload = e.data;
+    $('status').textContent = 'Table received - nothing has been imported yet.';
+    $('count').textContent = payload.rows.length;
+    $('game').textContent = payload.gameId || '?';
+    const sel = $('event');
+    const match = [...sel.options].find((o) => payload.gameId && o.dataset.ext === payload.gameId);
+    if (match) sel.value = match.value;
+    $('panel').classList.remove('hidden');
+  });
+
+  if (window.opener) {
+    window.opener.postMessage({ gateReady: true }, REG_ORIGIN);        // ask the registration page for its table
+  } else {
+    $('status').textContent = 'Open this window with the “Send to Gate” bookmark from the registration page (reservations table). If you just signed in, close this window and click the bookmark again.';
+  }
+
+  $('go').addEventListener('click', async () => {
+    if (!payload) return;
+    const eventId = Number($('event').value);
+    if (!eventId) { note('Choose an event first.', 'border-amber-500/40 bg-amber-500/10 text-amber-200'); return; }
+    $('go').disabled = true; $('go').classList.add('opacity-50'); $('result').innerHTML = '';
+    try {
+      const resp = await fetch('/registration/receive', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+        body: JSON.stringify({ event_id: eventId, game_id: payload.gameId || '', rows: payload.rows.map((r) => ({ c: r.c || '', t: r.t })) }),
+      });
+      const out = await resp.json().catch(() => ({}));
+      if (!resp.ok || !out.ok) { (out.errors || ['Import failed (' + resp.status + ').']).forEach((m) => note(m, 'border-rose-500/40 bg-rose-500/10 text-rose-200')); $('go').disabled = false; $('go').classList.remove('opacity-50'); return; }
+      (out.messages || []).forEach((m) => note(m, 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'));
+      (out.warnings || []).forEach((m) => note(m, 'border-amber-500/40 bg-amber-500/10 text-amber-200'));
+      $('open').href = out.manage_url; $('open').classList.remove('hidden'); $('open').classList.add('flex');
+      $('status').textContent = 'Done.';
+    } catch (err) {
+      note('Could not reach the server - are you still signed in? Sign in, then click the bookmark again.', 'border-rose-500/40 bg-rose-500/10 text-rose-200');
+      $('go').disabled = false; $('go').classList.remove('opacity-50');
+    }
+  });
+</script>
+{% endblock %}

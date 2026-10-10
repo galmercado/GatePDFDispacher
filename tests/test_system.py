@@ -1609,7 +1609,7 @@ def test_registration_table_is_found_and_mapped():
                    "נועה בר": ("972522222222", "פלוס", 1, 0, None, None),
                    "יוסי כהן": ("972533333333", "מצטרף", 0, 3, None, None)}
     assert [i.label for i in res.issues] == ["Row 3"] and "phone" in res.issues[0].errors[0]
-    assert res.ignored == ["#", "תשלום"]
+    assert res.ignored == ["תשלום"]            # "#" (row number) is silently ignored
 
 
 def test_registration_page_without_a_usable_table():
@@ -1680,7 +1680,7 @@ def test_registration_import_endpoints(admin, doorman, event_id, monkeypatch):
     monkeypatch.setattr("app.main.fetch_registration_page", fake_fetch)
     r = admin.post(f"/events/{event_id}/registration/fetch")
     assert calls == [("377", secret)] and "Registration #377: Imported 3 guest(s)." in r.text
-    assert "1 row(s) have problems" in r.text and "not recognised and were ignored: #, תשלום" in r.text
+    assert "1 row(s) have problems" in r.text and "not recognised and were ignored: תשלום" in r.text
     with SessionLocal() as db:
         dana = db.query(Attendee).filter_by(event_id=event_id, name="דנה לוי").one()
         assert (dana.adult_count, dana.youth_count, dana.age, dana.category) == (2, 1, 34.5, "חבר ארגון")
@@ -1718,3 +1718,171 @@ def test_hebrew_and_split_names_also_work_in_json_imports():
     res = services.parse_guest_list("g.json", json.dumps(rows, ensure_ascii=False).encode())
     v = res.valid[0]
     assert (v.name, v.adult_count, v.youth_count, v.category) == ("דנה לוי", 3, 1, "פלוס") and res.ignored == []
+
+
+# ----------------------------------------------------------------- gate11 page structure, members phone book, bookmarklet
+
+@pytest.fixture(autouse=True)
+def _fresh_members_book():
+    from app.models import AppSetting, Member
+    try:
+        with SessionLocal() as db:
+            db.query(Member).delete()
+            db.query(AppSetting).filter_by(key="members_override_phone").delete()
+            db.commit()
+    except Exception:       # tables do not exist yet before the first app start (pure unit tests)
+        pass
+    yield
+
+
+def site_html():
+    """Synthetic page shaped like the real reservations page: one table, a section row per category, the header
+    repeated in each section, totals + spacer rows, hidden 'saved' texts, checkboxes, junk in the age column."""
+    head = ("<tr><th>מזהה</th><th>שם</th><th>גיל</th><th>טלפון</th><th>מבוגר</th><th>נוער</th><th>הסעה</th>"
+            "<th>שולם</th><th>התקבל</th><th>הערות</th><th>פעולות</th></tr>")
+
+    def row(i, ref, name, age, phone, a, y, notes="אתר ארגון", transport=0):
+        return (f'<tr class="{"even" if i % 2 else "odd"}-row"><td>{ref}</td><td>{name}</td><td>{age}</td>'
+                f'<td class="hidden-xs hidden-sm">{phone}</td><td>{a}</td><td>{y}</td><td>{transport}</td>'
+                '<td><input type="checkbox" checked><span class="hide"> </span><div class="hide alert">נשמר</div></td>'
+                '<td><input type="checkbox" class="receive-checkbox"><div class="hide alert">לא התקבל נשמר</div></td>'
+                f'<td>{notes}</td><td><a href="#" class="edit-action">x</a></td></tr>')
+
+    def section(cls, title):
+        return f'<tr class="group section-title section-title-{cls}"><td></td><td>{title}</td>' + "<td></td>" * 9 + "</tr>"
+
+    def footer(cls, total):
+        return (f'<tr class="section-footer section-footer-{cls}"><td></td><td>סה"כ: {total}</td>' + "<td></td>" * 9 + "</tr>"
+                f'<tr class="section-separator section-separator-{cls}">' + "<td></td>" * 11 + "</tr>")
+
+    body = "".join([
+        section("members", "חברי ארגון"), head,
+        row(1, 11111111, "אבי לוי", "", "", 2, 0), row(2, 11111112, "גילה כהן", "", "052-7000001", 1, 1),
+        footer("members", 2),
+        section("newcomers", "מצטרפים"), head, row(3, 22222221, "רן שלום", "", "", 1, 0), footer("newcomers", 1),
+        section("plus", "פלוסים"), head,
+        row(4, 33333331, "נועם פלוס", "", "", 1, 0, notes="נרשם עי מישהו. פלוס של אבי"), footer("plus", 1),
+        section("public", "פתוח"), head,
+        row(5, 44444441, "דנה כרמל", "34.5", "0501110001", 2, 1, transport=2),
+        row(6, 44444442, "דנה כרמל", "yoniball12", "0501110001", 1, 0),          # second order, same name + phone
+        row(7, 44444443, "יוסי אפל", "51 ו 14", "+972 53-1110003", 0, 2, notes="נרשם עי Someone."),
+        footer("public", 3),
+    ])
+    return f'<html><body><table id="dataTables-ticketReservations"><thead>{head}</thead><tbody>{body}</tbody></table></body></html>'
+
+
+def test_site_page_sections_become_categories_and_noise_is_dropped():
+    res = services.parse_registration_html(site_html().encode())
+    got = {(v.external_ref): (v.name, v.category, v.adult_count, v.youth_count) for v in res.valid}
+    assert got == {"44444441": ("דנה כרמל", "פתוח", 2, 1), "44444442": ("דנה כרמל", "פתוח", 1, 0),   # two orders kept apart
+                   "44444443": ("יוסי אפל", "פתוח", 0, 2), "11111112": ("גילה כהן", "חבר ארגון", 1, 1)}
+    assert sorted(i.row["external_ref"] for i in res.issues) == ["11111111", "22222221", "33333331"]   # blank phone
+    assert {i.row["category"] for i in res.issues} == {"חבר ארגון", "מצטרף", "פלוס"}
+    assert res.bad_ages == 2 and res.ignored == []
+    by = {v.external_ref: v for v in res.valid}
+    assert by["44444441"].age == 34.5 and by["44444441"].notes == "הסעה: 2" and by["44444442"].age is None
+    assert by["44444443"].phone == "972531110003" and by["44444443"].notes == "נרשם עי Someone."        # boilerplate note dropped
+    assert not any("סה" in v.name for v in res.valid)                                                 # totals rows ignored
+
+
+def test_members_list_fills_missing_phones_from_the_site_import():
+    from app.services import MemberBook
+    book = MemberBook([("אבי לוי", "972521000001"), ("רן שלום", "972521000002"), ("כהן דוד", "972521000003"),
+                       ("שם כפול", "972521000004"), ("שם כפול", "972521000005")])
+    assert book.lookup("לוי  אבי") == "972521000001" and book.lookup('אבי "לוי"') == "972521000001"   # order/quotes don't matter
+    assert book.lookup("דוד כהן") == "972521000003" and book.lookup("שם כפול") is None and book.lookup("מישהו") is None
+    res = services.parse_registration_html(site_html().encode(), members=book)
+    assert res.filled == 2 and sorted(i.row["external_ref"] for i in res.issues) == ["33333331"]       # the plus is not a member
+    by = {v.name: v for v in res.valid}
+    assert by["אבי לוי"].phone == "972521000001" and by["אבי לוי"].category == "חבר ארגון"
+    override = MemberBook([("גילה כהן", "972529999999")], override=True)       # the member's own number wins
+    assert {v.name: v.phone for v in services.parse_registration_html(site_html().encode(), members=override).valid}["גילה כהן"] == "972529999999"
+    keep = MemberBook([("גילה כהן", "972529999999")], override=False)
+    assert {v.name: v.phone for v in services.parse_registration_html(site_html().encode(), members=keep).valid}["גילה כהן"] == "972527000001"
+
+
+def test_reimport_matches_by_reservation_id_not_by_name(admin, event_id):
+    r = admin.post(f"/events/{event_id}/registration/upload", data={"html": site_html()})
+    assert "Saved page: Imported 4 guest(s)." in r.text and "3 row(s) have problems" in r.text
+    with SessionLocal() as db:
+        assert db.query(Attendee).filter_by(event_id=event_id, name="דנה כרמל").count() == 2        # two separate orders
+    changed = site_html().replace("<td>44444441</td><td>דנה כרמל</td>", "<td>44444441</td><td>דנה כרמל-לוי</td>")
+    r = admin.post(f"/events/{event_id}/registration/upload", data={"html": changed})
+    assert "Imported 0 guest(s)." in r.text and "name דנה כרמל→דנה כרמל-לוי" in r.text
+    with SessionLocal() as db:
+        assert db.query(Attendee).filter_by(event_id=event_id).count() == 4                          # renamed, not duplicated
+        assert db.query(Attendee).filter_by(external_ref="44444441").one().name == "דנה כרמל-לוי"
+    # a guest imported earlier from a plain file (no id) is adopted by the site's reservation
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(
+        [{"name": "רונית פתוח", "phone": "0509990000", "adult": 1}]).encode())})
+    row = '<tr class="odd-row"><td>55555555</td><td>רונית פתוח</td><td></td><td>0509990000</td><td>2</td><td>0</td><td>0</td><td></td><td></td><td></td><td></td></tr>'
+    admin.post(f"/events/{event_id}/registration/upload", data={"html": site_html().replace("</tbody>", row + "</tbody>")})
+    with SessionLocal() as db:
+        g = db.query(Attendee).filter_by(event_id=event_id, name="רונית פתוח").all()
+        assert len(g) == 1 and g[0].external_ref == "55555555" and g[0].adult_count == 2
+
+
+def test_members_page_and_retrying_waiting_rows(admin, doorman, event_id):
+    assert doorman.get("/members").status_code == 403 and TestClient(app, follow_redirects=False).get("/members").status_code == 303
+    r = admin.post(f"/events/{event_id}/registration/upload", data={"html": site_html()})
+    assert "3 row(s) have problems" in r.text and "without a phone number" in r.text
+    assert "Added אבי לוי" in admin.post("/members", data={"name": "אבי לוי", "phone": "052-1000001"}).text
+    assert admin.post("/members", data={"name": "לוי אבי", "phone": "052-1000009"}).status_code == 422       # same name, other order
+    assert admin.post("/members", data={"name": "x", "phone": "12"}).status_code == 422
+    r = admin.post("/members/import", data={"text": "שם, טלפון\nרן שלום, 053-2000002\n0541234567\tנועם פלוס\nבלי טלפון\nאבי לוי, 052-1000001"})
+    assert "Added 2, updated 0, 1 already up to date." in r.text and "Line 3" in r.text                      # header skipped, bad line reported
+    assert doorman.post("/members/import", data={"text": "a, 0501234567"}).status_code == 403
+    r = admin.post(f"/events/{event_id}/import-issues/retry")                                             # the waiting rows now pass
+    assert "Added 3 waiting guest(s). 3 phone number(s) came from the Members list." in r.text and "need fixing" not in r.text
+    with SessionLocal() as db:
+        assert db.query(Attendee).filter_by(event_id=event_id).count() == 7
+        g = db.query(Attendee).filter_by(event_id=event_id, name="אבי לוי").one()
+        assert (g.phone, g.category, g.external_ref, g.adult_count) == ("972521000001", "חבר ארגון", "11111111", 2)
+    form = {"name": "דוד חדש", "phone": "", "category": "חבר ארגון", "adult_count": "1", "youth_count": "0"}
+    assert admin.post(f"/events/{event_id}/attendees", data=form).status_code == 422                       # not in the book yet
+    admin.post("/members", data={"name": "דוד חדש", "phone": "054-3000003"})
+    r = admin.post(f"/events/{event_id}/attendees", data=form)                                            # manual add uses the book
+    assert r.status_code == 200 and "Added דוד חדש" in r.text
+    with SessionLocal() as db:
+        from app.models import Member
+        mid = db.query(Member).filter_by(name="רן שלום").one().id
+    assert "Saved רן שלום" in admin.post(f"/members/{mid}/edit", data={"name": "רן שלום", "phone": "053-7777777", "notes": "x"}).text
+    assert "Setting saved" in admin.post("/members/settings", data={"override": "on"}).text
+    assert "checked" in admin.get("/members").text.split('id="override"')[1][:60]
+    assert "Removed רן שלום" in admin.post(f"/members/{mid}/delete").text
+
+
+def test_member_file_formats():
+    assert services.parse_member_file("m.csv", "שם,טלפון\nדנה לוי,052-1111111\n".encode("utf-8")) == [("דנה לוי", "052-1111111")]
+    buf = io.BytesIO()
+    pd.DataFrame({"שם פרטי": ["יוסי"], "שם משפחה": ["כהן"], "נייד": ["053-2222222"]}).to_excel(buf, index=False)
+    assert services.parse_member_file("m.xlsx", buf.getvalue()) == [("יוסי כהן", "053-2222222")]
+    assert services.parse_member_file("m.json", json.dumps([{"name": "A B", "phone": "0501234567"}]).encode()) == [("A B", "0501234567")]
+    with pytest.raises(services.ImportValidationError):
+        services.parse_member_file("m.pdf", b"x")
+
+
+def test_send_to_gate_bookmarklet_and_receiver(admin, doorman, event_id):
+    from app.main import bookmarklet_source
+    js = bookmarklet_source("https://tickets.example.org")
+    assert js.startswith("javascript:") and "var O='https://tickets.example.org'" in js and "/registration/receiver" in js and "e.origin!==O" in js
+    assert "\n" not in js and '"' not in js                                  # one line, safe inside an href attribute
+    page = admin.get(f"/events/{event_id}/manage").text
+    assert "Send to Gate" in page and "/registration/receiver" in page
+    assert doorman.get("/registration/receiver").status_code == 403
+    recv = admin.get("/registration/receiver")
+    assert recv.status_code == 200 and "https://gate11.co.il" in recv.text and "window.opener" in recv.text
+    import lxml.html          # rows exactly as the bookmarklet collects them: [{c: row class, t: [cell texts]}]
+    table = lxml.html.fromstring(site_html()).xpath("//table")[0]
+    rows = [{"c": tr.get("class") or "", "t": [" ".join(c.text_content().split()) for c in tr.xpath("./th|./td")]} for tr in table.xpath(".//tr")]
+    body = {"event_id": event_id, "game_id": "376", "rows": rows}
+    assert doorman.post("/registration/receive", json=body).status_code == 403
+    out = admin.post("/registration/receive", json=body)
+    assert out.status_code == 200 and out.json()["ok"] and "Registration #376: Imported 4 guest(s)." in out.json()["messages"][0]
+    assert any("3 row(s) have problems" in w for w in out.json()["warnings"]) and out.json()["manage_url"] == f"/events/{event_id}/manage"
+    with SessionLocal() as db:
+        assert db.get(Event, event_id).external_id == "376"                 # the game id is remembered for next time
+        assert db.query(Attendee).filter_by(event_id=event_id).count() == 4
+    assert admin.post("/registration/receive", json={**body, "event_id": 99999}).status_code == 404
+    assert admin.post("/registration/receive", json={"event_id": event_id, "game_id": "1", "rows": [{"c": "", "t": ["a", "b"]}]}).status_code == 422
+    assert admin.post("/registration/receive", json={"event_id": event_id}).status_code == 422

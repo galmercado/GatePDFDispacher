@@ -15,9 +15,9 @@ from pathlib import Path
 
 import segno
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -30,13 +30,13 @@ from .auth import (
 from . import lines as linesmod
 from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
-from .models import Attendee, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Ticket, User, utcnow
+from .models import Attendee, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Member, Ticket, User, utcnow
 from .messages import ticket_caption
 from .services import (
     AttendeeIn, ImportValidationError, describe_validation_error, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
     import_attendees,
-    RegistrationError, evolution_connect, evolution_create_instance, evolution_delete_instance, evolution_state,
-    event_ticket_dir, fetch_registration_page, normalize_phone, parse_registration_html, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, ticket_status,
+    GridRow, MemberBook, RegistrationError, evolution_connect, evolution_create_instance, evolution_delete_instance, evolution_state,
+    event_ticket_dir, fetch_registration_page, name_keys, normalize_phone, parse_registration_grid, parse_member_file, parse_member_text, parse_registration_html, parse_rows, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, ticket_status,
 )
 
 log = logging.getLogger("gate")
@@ -197,6 +197,8 @@ app = FastAPI(title="Gate - Event Ticketing & Door Vetting", lifespan=lifespan)
 
 def render(request: Request, name: str, ctx: dict | None = None, status: int = 200,
            headers: dict | None = None) -> HTMLResponse:
+    if name == "manage.html" and ctx is not None:
+        ctx.setdefault("bookmarklet", bookmarklet_source(public_base_url(request)))
     return templates.TemplateResponse(request, name, ctx or {}, status_code=status, headers=headers)
 
 
@@ -496,7 +498,7 @@ def manage_ctx(db: Session, user: User, event: Event, **extra) -> dict:
     attendees = (db.query(Attendee).options(selectinload(Attendee.tickets))
                  .filter(Attendee.event_id == event.id).order_by(func.lower(Attendee.name), Attendee.id).all())
     return {"user": user, "event": event, "stats": compute_stats(db, event.id),
-            "issues": load_issues(db, event.id), "has_cookie": bool(registration_cookie(db)),
+            "issues": load_issues(db, event.id), "has_cookie": bool(registration_cookie(db)), "members_count": db.query(Member).count(),
             "registration_host": config.REGISTRATION_BASE_URL.removeprefix("https://"), "max_pdf_mb": config.MAX_PDF_BYTES // (1024 * 1024),
             "max_list_mb": config.MAX_LIST_BYTES // (1024 * 1024), "ticket_files": tickets, "spare_pages": status["spare"], "warnings": warnings, "attendees": attendees, "groups": group_by_category(attendees),
             "categories": data.CATEGORIES, "messages": [], "errors": [], **extra}
@@ -526,7 +528,7 @@ async def import_guest_list(
     try:
         if len(content) > config.MAX_LIST_BYTES:
             raise ImportValidationError(["File is too large (5 MB max)"])
-        parsed = parse_guest_list(file.filename or "", content)
+        parsed = parse_guest_list(file.filename or "", content, member_book(db))
     except ImportValidationError as exc:
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=exc.errors[:50]), status=422)
@@ -534,10 +536,27 @@ async def import_guest_list(
 
 
 def finish_import(request: Request, db: Session, user: User, event: Event, parsed, source: str = "") -> HTMLResponse:
-    """Save the valid rows (adding new guests, updating existing ones), park the bad rows for fix-or-skip,
-    hand out spare ticket PDFs, and show the result."""
+    msgs, warnings = run_import(db, event, parsed, source)
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, warnings=warnings))
+
+
+def member_book(db: Session) -> MemberBook:
+    """Phone book of organisation members (Members page), used to fill in phone numbers that are missing."""
+    entries = [(m.name, m.phone) for m in db.query(Member)]
+    return MemberBook(entries, override=linesmod.get_setting(db, "members_override_phone", "") == "1")
+
+
+def fill_member_phone(db: Session, name: str, phone: str) -> str:
+    if 7 <= len(re.sub(r"\D", "", phone or "")) <= 15:
+        return phone
+    return member_book(db).lookup(name) or phone
+
+
+def run_import(db: Session, event: Event, parsed, source: str = "") -> tuple[list[str], list[str]]:
+    """Save the valid rows (adding new guests, updating existing ones), park the bad rows for fix-or-skip and
+    hand out spare ticket PDFs. Returns (messages, warnings)."""
     outcome = import_attendees(db, event.id, parsed.valid)
-    for issue in parsed.issues:      # bad rows wait for the admin: fix them or skip them
+    for issue in parsed.issues:
         db.add(ImportIssue(event_id=event.id, label=issue.label, data=json.dumps(issue.row, ensure_ascii=False),
                            errors=json.dumps(issue.errors, ensure_ascii=False)))
     db.commit()
@@ -548,15 +567,21 @@ def finish_import(request: Request, db: Session, user: User, event: Event, parse
         msgs.append(f"Updated {outcome.updated} existing guest(s): {shown}")
     if outcome.unchanged:
         msgs.append(f"{outcome.unchanged} existing guest(s) already up to date.")
+    if parsed.filled:
+        msgs.append(f"{parsed.filled} phone number(s) were taken from the Members list.")
     if result["assigned"]:
         msgs.append(f"Assigned {result['assigned']} spare ticket page(s) automatically.")
     warnings = list(outcome.warnings)
     if parsed.issues:
-        warnings.append(f"{len(parsed.issues)} row(s) have problems and were NOT imported. Fix them or skip them below.")
+        missing = sum(1 for i in parsed.issues if any(e.startswith("phone") for e in i.errors))
+        hint = f" ({missing} without a phone number - add them to the Members list and press “Retry waiting rows”)" if missing else ""
+        warnings.append(f"{len(parsed.issues)} row(s) have problems and were NOT imported{hint}. Fix them or skip them below.")
     if parsed.ignored:
         warnings.append("These columns/keys were not recognised and were ignored: " + ", ".join(parsed.ignored)
                         + ". Recognised: name, phone, category, adult/מבוגר, youth/נוער, email, age, notes.")
-    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, warnings=warnings))
+    if parsed.bad_ages:
+        warnings.append(f"{parsed.bad_ages} row(s) had an age that is not a number; the age was left empty.")
+    return msgs, warnings
 
 
 # ---- import from the registration system (gate11.co.il admin page)
@@ -602,7 +627,7 @@ async def fetch_registration(event_id: int, request: Request, user: User = Depen
     event = get_event_or_404(db, event_id)
     try:
         page = await fetch_registration_page(event.external_id or "", registration_cookie(db))
-        parsed = parse_registration_html(page)
+        parsed = parse_registration_html(page, member_book(db))
     except (RegistrationError, ImportValidationError) as exc:
         errors = exc.errors if isinstance(exc, ImportValidationError) else [str(exc)]
         return render(request, "manage.html", manage_ctx(db, user, event, errors=errors), status=422)
@@ -618,7 +643,7 @@ async def upload_registration_page(event_id: int, request: Request, file: Upload
     try:
         if len(content) > config.MAX_REGISTRATION_BYTES:
             raise RegistrationError("The page is too large")
-        parsed = parse_registration_html(content)
+        parsed = parse_registration_html(content, member_book(db))
     except RegistrationError as exc:
         return render(request, "manage.html", manage_ctx(db, user, event, errors=[str(exc)]), status=422)
     return finish_import(request, db, user, event, parsed, source="Saved page: ")
@@ -636,13 +661,14 @@ def fix_import_issue(
     issue_id: int, request: Request,
     name: str = Form(""), phone: str = Form(""), email: str = Form(""), age: str = Form(""),
     category: str = Form(data.DEFAULT_CATEGORY), adult_count: str = Form(""), youth_count: str = Form(""),
-    notes: str = Form(""),
+    notes: str = Form(""), external_ref: str = Form(""),
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     issue = get_issue_or_404(db, issue_id)
     event = get_event_or_404(db, issue.event_id)
+    phone = fill_member_phone(db, name, phone)
     form = dict(name=name, phone=phone, email=email, age=age, category=category,
-                adult_count=adult_count, youth_count=youth_count, notes=notes)
+                adult_count=adult_count, youth_count=youth_count, notes=notes, external_ref=external_ref)
     item, errors = validate_attendee_form(**form)
     if item and is_duplicate(db, event.id, item):
         errors = [f"{item.name} ({item.phone}) is already on the list."]
@@ -656,6 +682,30 @@ def fix_import_issue(
     db.commit()
     rebalance_tickets(db, event.id)
     return render(request, "manage.html", manage_ctx(db, user, event, **guest_outcome(db, attendee, "Added")))
+
+
+@app.post("/events/{event_id}/import-issues/retry", response_class=HTMLResponse)
+def retry_import_issues(event_id: int, request: Request, user: User = Depends(require_admin),
+                        db: Session = Depends(get_db)):
+    """Re-check every waiting row (e.g. after adding phone numbers to the Members list) and import those that now pass."""
+    event = get_event_or_404(db, event_id)
+    book = member_book(db)
+    solved, filled, still = [], 0, 0
+    for issue in db.query(ImportIssue).filter(ImportIssue.event_id == event.id).order_by(ImportIssue.id).all():
+        result = parse_rows([json.loads(issue.data)], offset=1, members=book)
+        if result.valid:
+            solved.extend(result.valid)
+            filled += result.filled
+            db.delete(issue)
+        else:
+            still += 1
+            issue.errors = json.dumps(result.issues[0].errors, ensure_ascii=False)
+    outcome = import_attendees(db, event.id, solved)
+    db.commit()
+    rebalance_tickets(db, event.id)
+    msgs = [f"Added {outcome.added} waiting guest(s)." + (f" {filled} phone number(s) came from the Members list." if filled else "")]
+    warns = [f"{still} row(s) still need fixing."] if still else []
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, warnings=warns))
 
 
 @app.post("/import-issues/{issue_id}/skip", response_class=HTMLResponse)
@@ -732,6 +782,9 @@ def validate_attendee_form(**fields) -> tuple[AttendeeIn | None, list[str]]:
 
 
 def is_duplicate(db: Session, event_id: int, item: AttendeeIn, exclude_id: int | None = None) -> bool:
+    if item.external_ref:       # identified by its reservation id: only the same reservation is a duplicate
+        q = db.query(Attendee).filter(Attendee.event_id == event_id, Attendee.external_ref == item.external_ref)
+        return (q.filter(Attendee.id != exclude_id) if exclude_id else q).first() is not None
     q = db.query(Attendee).filter(Attendee.event_id == event_id, Attendee.phone == item.phone,
                                   func.lower(Attendee.name) == item.name.lower())
     if exclude_id:
@@ -775,6 +828,7 @@ def add_attendee(
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     event = get_event_or_404(db, event_id)
+    phone = fill_member_phone(db, name, phone)
     item, errors = validate_attendee_form(name=name, phone=phone, email=email, age=age, category=category,
                                           adult_count=adult_count, youth_count=youth_count, notes=notes)
     if item and is_duplicate(db, event.id, item):
@@ -1338,6 +1392,179 @@ async def delete_line(line_id: int, request: Request, user: User = Depends(requi
     db.delete(line)
     db.commit()
     return render(request, "lines.html", lines_ctx(db, user, messages=[f"Removed {label}."], errors=errors))
+
+
+# --------------------------------------------------------------------------- members phone book (admin only)
+
+def members_ctx(db: Session, user: User, **extra) -> dict:
+    members = db.query(Member).order_by(func.lower(Member.name)).all()
+    return {"user": user, "members": members, "override": linesmod.get_setting(db, "members_override_phone", "") == "1",
+            "messages": [], "errors": [], **extra}
+
+
+def clean_member(name: str, phone: str) -> tuple[str, str, list[str]]:
+    name = " ".join((name or "").split())[:255]
+    digits = normalize_phone(phone) if (phone or "").strip() else ""
+    errors = []
+    if not name:
+        errors.append("name is missing")
+    if not 8 <= len(digits) <= 15:
+        errors.append("phone number is missing or not valid")
+    return name, digits, errors
+
+
+@app.get("/members", response_class=HTMLResponse)
+def members_page(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return render(request, "members.html", members_ctx(db, user))
+
+
+@app.post("/members", response_class=HTMLResponse)
+def add_member(request: Request, name: str = Form(""), phone: str = Form(""), notes: str = Form(""),
+               user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    name, digits, errors = clean_member(name, phone)
+    key = name_keys(name)[1]
+    if not errors and db.query(Member).filter(Member.name_key == key).first():
+        errors.append(f"{name} is already in the list - edit that entry instead")
+    if errors:
+        return render(request, "members.html", members_ctx(db, user, errors=[f"{e}." for e in errors]), status=422)
+    db.add(Member(name=name, name_key=key, phone=digits, notes=notes.strip()[:500] or None))
+    db.commit()
+    return render(request, "members.html", members_ctx(db, user, messages=[f"Added {name}."]))
+
+
+@app.post("/members/import", response_class=HTMLResponse)
+async def import_members(request: Request, file: UploadFile = File(None), text: str = Form(""),
+                         user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Bulk add / update: a file (.xlsx .csv .json .txt) or pasted lines. Existing names get the new phone number."""
+    try:
+        if file is not None and file.filename:
+            content = await file.read(config.MAX_LIST_BYTES + 1)
+            if len(content) > config.MAX_LIST_BYTES:
+                raise ImportValidationError(["File is too large (5 MB max)"])
+            pairs = parse_member_file(file.filename, content)
+        else:
+            pairs = parse_member_text(text)
+    except ImportValidationError as exc:
+        return render(request, "members.html", members_ctx(db, user, errors=exc.errors), status=422)
+    if not pairs:
+        return render(request, "members.html", members_ctx(db, user, errors=["Nothing to import - paste lines like “name, phone” or upload a file."]), status=422)
+    existing = {m.name_key: m for m in db.query(Member)}
+    added = updated = unchanged = 0
+    errors, seen = [], {}
+    for i, (raw_name, raw_phone) in enumerate(pairs, start=1):
+        name, digits, problems = clean_member(raw_name, raw_phone)
+        if problems:
+            errors.append(f"Line {i}: {', '.join(problems)}" + (f" ({name})" if name else ""))
+            continue
+        key = name_keys(name)[1]
+        if seen.get(key, digits) != digits:
+            errors.append(f"Line {i}: {name} appears with two different phone numbers - skipped")
+            continue
+        seen[key] = digits
+        member = existing.get(key)
+        if member is None:
+            member = Member(name=name, name_key=key, phone=digits)
+            db.add(member)
+            existing[key] = member
+            added += 1
+        elif member.phone != digits:
+            member.phone, updated = digits, updated + 1
+        else:
+            unchanged += 1
+    db.commit()
+    msgs = [f"Added {added}, updated {updated}, {unchanged} already up to date."]
+    return render(request, "members.html", members_ctx(db, user, messages=msgs, errors=errors[:30]), status=200)
+
+
+@app.post("/members/settings", response_class=HTMLResponse)
+def members_settings(request: Request, override: str = Form(""), user: User = Depends(require_admin),
+                     db: Session = Depends(get_db)):
+    linesmod.set_setting(db, "members_override_phone", "1" if override == "on" else "")
+    return render(request, "members.html", members_ctx(db, user, messages=["Setting saved."]))
+
+
+@app.post("/members/{member_id}/edit", response_class=HTMLResponse)
+def edit_member(member_id: int, request: Request, name: str = Form(""), phone: str = Form(""), notes: str = Form(""),
+                user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    member = db.get(Member, member_id)
+    if member is None:
+        raise HTTPException(404, "Member not found")
+    name, digits, errors = clean_member(name, phone)
+    key = name_keys(name)[1]
+    clash = db.query(Member).filter(Member.name_key == key, Member.id != member.id).first()
+    if clash:
+        errors.append(f"{name} is already in the list")
+    if errors:
+        return render(request, "members.html", members_ctx(db, user, errors=[f"{e}." for e in errors]), status=422)
+    member.name, member.name_key, member.phone, member.notes = name, key, digits, notes.strip()[:500] or None
+    db.commit()
+    return render(request, "members.html", members_ctx(db, user, messages=[f"Saved {name}."]))
+
+
+@app.post("/members/{member_id}/delete", response_class=HTMLResponse)
+def delete_member(member_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    member = db.get(Member, member_id)
+    if member is None:
+        raise HTTPException(404, "Member not found")
+    name = member.name
+    db.delete(member)
+    db.commit()
+    return render(request, "members.html", members_ctx(db, user, messages=[f"Removed {name}."]))
+
+
+# ---- "Send to Gate" bookmarklet: the registration page posts its table to a popup of this site
+
+class ReceivedRow(BaseModel):
+    c: str = Field("", max_length=300)
+    t: list[str] = Field(default_factory=list, max_length=60)
+
+
+class ReceivedTable(BaseModel):
+    event_id: int
+    game_id: str = Field("", max_length=32)
+    rows: list[ReceivedRow] = Field(max_length=5000)
+
+
+def bookmarklet_source(origin: str) -> str:
+    """javascript: URL to drag to the bookmarks bar. Runs on the registration site's reservations page, collects the
+    visible text of the table and hands it to the receiver popup of this site (checked by origin on both sides)."""
+    js = (
+        "(function(){var O='%s';var ts=[].slice.call(document.querySelectorAll('table'));"
+        "var t=document.querySelector('table[id*=ticketReservations]')||ts.sort(function(a,b){return b.rows.length-a.rows.length})[0];"
+        "if(!t){alert('No reservations table found on this page.');return;}"
+        "var rows=[].slice.call(t.rows).map(function(r){return{c:r.className,t:[].slice.call(r.cells).map(function(c){"
+        "var k=c.cloneNode(true);[].slice.call(k.querySelectorAll('.hide,script,style')).forEach(function(e){e.remove()});"
+        "return(k.textContent||'').replace(/\\s+/g,' ').trim()})}});"
+        "var g=(new URLSearchParams(location.search)).get('gameId')||'';"
+        "window.open(O+'/registration/receiver','gate_receiver','width=560,height=740');"
+        "window.addEventListener('message',function(e){if(e.origin!==O||!e.data||!e.data.gateReady)return;"
+        "e.source.postMessage({type:'gate-table',rows:rows,gameId:g},O)});})();"
+    ) % origin
+    return "javascript:" + js
+
+
+@app.get("/registration/receiver", response_class=HTMLResponse)
+def registration_receiver(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    events = db.query(Event).order_by(Event.event_date.desc()).all()
+    return render(request, "registration_receiver.html", {
+        "user": user, "events": events, "reg_origin": config.REGISTRATION_BASE_URL})
+
+
+@app.post("/registration/receive")
+def registration_receive(body: ReceivedTable, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    event = db.get(Event, body.event_id)
+    if event is None:
+        return JSONResponse({"ok": False, "errors": ["Choose an event."]}, status_code=404)
+    try:
+        grid = [GridRow(r.c, [" ".join(x.split()) for x in r.t]) for r in body.rows]
+        parsed = parse_registration_grid(grid, member_book(db))
+    except RegistrationError as exc:
+        return JSONResponse({"ok": False, "errors": [str(exc)]}, status_code=422)
+    if re.fullmatch(r"\d{1,9}", body.game_id or "") and not event.external_id:
+        event.external_id = body.game_id          # remember which registration game this event is
+        db.commit()
+    msgs, warnings = run_import(db, event, parsed, source=f"Registration #{body.game_id}: " if body.game_id else "")
+    return {"ok": True, "messages": msgs, "warnings": warnings, "manage_url": f"/events/{event.id}/manage"}
 
 
 # --------------------------------------------------------------------------- users & account

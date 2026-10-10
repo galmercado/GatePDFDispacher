@@ -51,6 +51,9 @@ OTHER_LABEL_LOCATION = "אחר (הקלידו אולם)…"
 CATEGORIES = ["חבר ארגון", "מצטרף", "פלוס", "פתוח"]
 DEFAULT_CATEGORY = "פתוח"
 CATEGORY_ALIASES = {
+    # section titles of the registration site (and plural forms)
+    "חברי ארגון": "חבר ארגון", "חברי הארגון": "חבר ארגון", "מצטרפים": "מצטרף", "פלוסים": "פלוס", "קהל פתוח": "פתוח",
+    "ציבור": "פתוח",
     "member": "חבר ארגון", "organization member": "חבר ארגון", "organisation member": "חבר ארגון",
     "joiner": "מצטרף", "new": "מצטרף", "new member": "מצטרף",
     "plus": "פלוס",

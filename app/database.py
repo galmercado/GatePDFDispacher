@@ -64,6 +64,10 @@ def migrate(bind: Engine) -> None:
     if "events" in names and "lines_tested_at" not in {c["name"] for c in insp.get_columns("events")}:
         with bind.begin() as conn:
             conn.execute(text("ALTER TABLE events ADD COLUMN lines_tested_at DATETIME"))
+    if "attendees" in names and "external_ref" not in {c["name"] for c in insp.get_columns("attendees")}:
+        with bind.begin() as conn:
+            conn.execute(text("ALTER TABLE attendees ADD COLUMN external_ref VARCHAR(32)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_attendees_external_ref ON attendees (external_ref)"))
     if "events" in names and "external_id" not in {c["name"] for c in insp.get_columns("events")}:
         with bind.begin() as conn:
             conn.execute(text("ALTER TABLE events ADD COLUMN external_id VARCHAR(32)"))

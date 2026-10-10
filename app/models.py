@@ -67,6 +67,7 @@ class Attendee(Base):
     youth_count: Mapped[int] = mapped_column(Integer, default=0)   # נוער tickets
     ticket_count: Mapped[int] = mapped_column(Integer, default=1)  # always adult_count + youth_count
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    external_ref: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)   # reservation id in the registration system
     admitted_adult: Mapped[int] = mapped_column(Integer, default=0)   # tickets let in so far (partial entry)
     admitted_youth: Mapped[int] = mapped_column(Integer, default=0)
     checked_in: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -214,3 +215,16 @@ class AppSetting(Base):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
+
+
+class Member(Base):
+    """Phone book of organisation members (חברי ארגון): used to fill in missing phone numbers on import."""
+
+    __tablename__ = "members"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    name_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)   # normalised name, for matching
+    phone: Mapped[str] = mapped_column(String(32))
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
