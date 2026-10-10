@@ -14,6 +14,8 @@ Runs on Docker Compose, locally or on an Oracle Cloud Always-Free ARM VM.
 - **Partial entry**: *Partial send* on a card (orders with 2+ tickets) opens a popup to choose how many adult/youth tickets to hand out now, by
   WhatsApp or QR. Only those tickets are admitted ("Partial 1/3"); later the WhatsApp/QR buttons send the rest, or send another partial amount.
   Undo resets the whole order.
+- **QR at the door**: one QR code per hand-out whose link downloads a single ZIP with all the ticket PDFs being handed over (a partial send zips only the chosen ones;
+  un-admit kills the link).
 - **Door cockpit** (admin + doorman): search, guests grouped by category with live counters, admitted total for all types
   at the top. WhatsApp and QR buttons both admit the guest; a small side button toggles admission only. Admins also get an *Edit* button on every card (e.g. to change the ticket amount); doormen can only admit.
 - **Users**: admins manage users; sign in with password and/or Google.
@@ -105,6 +107,13 @@ Limits: WhatsApp only lets you delete for everyone for roughly two days after se
 the event can no longer be deleted afterwards. Evolution API does not expose WhatsApp's own disappearing-messages timer for
 one-to-one chats, which is why the app does the deleting itself. Guests see "This message was deleted". Only messages sent after
 this feature was deployed can be deleted.
+
+## Site settings (admin)
+
+The **Settings** page (sliders icon) edits the main constants without touching files: the **ticket message wording** (greetings, main sentence, ticket counter, date line,
+closings, emoji - English and Hebrew sets, with a live preview), WhatsApp pacing (gap, random jitter, typing time, daily limit per line, minimum working lines, line-test lead
+time), message deletion (on un-admit / after the event, the random delay window, event length), and the event form (home team, opponents, venues, default venue, time zone,
+default phone country code). Changes apply immediately, are stored in the database and survive restarts; *Reset* restores a section's built-in defaults (the values from `.env`/code).
 
 ## Import from the registration system (gate11.co.il)
 
@@ -244,7 +253,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/p
 ## Notes
 
 - Doormen can view the event list and use the cockpit; admins create events, manage guests/tickets and users.
-- QR codes link straight to the ticket PDF (`/tickets/claim/{token}/ticket.pdf`); the token is an unguessable 32-hex UUID4.
+- Door QR codes link to one ZIP (`/tickets/bundle/{token}/tickets.zip`); individual PDFs stay reachable at `/tickets/claim/{token}/ticket.pdf`. Tokens are unguessable 32-hex UUID4s.
   `/tickets/claim/{token}` is a small mobile page with a Download button.
 - Ticket PDFs are additive: each upload adds pages to the pool; tick *Start over* to replace everything.
 - Team and arena lists live in `app/data.py`.

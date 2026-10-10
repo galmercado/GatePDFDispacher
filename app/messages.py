@@ -40,6 +40,11 @@ _HE = {
 }
 
 
+PARTS = {"en": _EN, "he": _HE}                    # edited at runtime on the Settings page
+DEFAULT_PARTS = {lang: {k: list(v) for k, v in parts.items()} for lang, parts in PARTS.items()}
+PART_PLACEHOLDERS = {"greet": ("name",), "body": ("event",), "count": ("i", "n"), "when": ("when",), "close": (), "emoji": ()}
+
+
 def _first_name(name: str) -> str:
     return (name.split() or [name])[0]
 
@@ -48,7 +53,7 @@ def ticket_caption(name: str, event_name: str, event_date: datetime | None = Non
                    lang: str | None = None, rng: random.Random | None = None) -> str:
     """A slightly different message each time (never repeats one of the last dozen)."""
     rng = rng or random
-    parts = _HE if (lang or config.WHATSAPP_MESSAGE_LANG) == "he" else _EN
+    parts = PARTS["he" if (lang or config.WHATSAPP_MESSAGE_LANG) == "he" else "en"]
     when = event_date.strftime("%a %d/%m at %H:%M") if event_date else ""
     for _ in range(20):
         greet = rng.choice(parts["greet"]).format(name=_first_name(name))

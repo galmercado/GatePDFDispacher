@@ -1986,3 +1986,114 @@ def test_bundle_link_survives_ticket_reassignment_safely(admin, doorman, event_i
     url = re.search(r"(/tickets/bundle/\w+/tickets\.zip)", doorman.post(f"/attendees/{att}/qr").text).group(1)
     admin.post(f"/attendees/{att}/delete")                                  # guest removed: link must stop working
     assert TestClient(app).get(url).status_code == 404
+
+
+# ----------------------------------------------------------------- admin site settings
+
+@pytest.fixture(autouse=True)
+def _default_site_settings():
+    yield
+    try:
+        from app import site_settings
+        with SessionLocal() as db:
+            site_settings.reset_group(db, None)
+    except Exception:
+        pass
+
+
+def sform(**kw):
+    return {f"f.{k.replace('__', '.')}": v for k, v in kw.items()}
+
+
+def test_settings_page_is_admin_only_and_shows_every_group(admin, doorman):
+    assert doorman.get("/settings").status_code == 403 and TestClient(app, follow_redirects=False).get("/settings").status_code == 303
+    assert doorman.post("/settings/sending", data={"f.send.min_interval": "9"}).status_code == 403
+    page = admin.get("/settings").text
+    for title in ("Ticket message", "WhatsApp sending &amp; lines", "Deleting messages", "Event form &amp; phone numbers"):
+        assert title in page
+    assert "Greetings (EN)" in page and "Opponent teams" in page and "Preview of the saved wording" in page
+
+
+def test_ticket_text_can_be_edited_and_is_used_for_sending(admin, doorman, event_id, wa, monkeypatch):
+    from app.messages import ticket_caption
+    form = {"f.msg.lang": "en", "f.msg.en.greet": "Yo {name}\nHey {name}", "f.msg.en.body": "your {event} ticket is here",
+            "f.msg.en.count": "", "f.msg.en.when": "", "f.msg.en.close": "See you!", "f.msg.en.emoji": "",
+            "f.msg.he.greet": "שלום {name}", "f.msg.he.body": "הכרטיס ל{event}", "f.msg.he.count": "", "f.msg.he.when": "",
+            "f.msg.he.close": "", "f.msg.he.emoji": ""}
+    r = admin.post("/settings/message", data=form)
+    assert r.status_code == 200 and "Ticket message: saved." in r.text
+    texts = {ticket_caption("Dana Levi", "Final", None, lang="en") for _ in range(60)}
+    assert all(t.startswith(("Yo Dana", "Hey Dana")) and "your Final ticket is here" in t and t.rstrip(".!").endswith("See you!") or "See you!" in t for t in texts)
+    assert not any("Hi " in t for t in texts)                                       # the old wording is gone
+    captions = []
+
+    async def spy(phone, path, caption, file_name="t.pdf", client=None, instance=None):
+        captions.append(caption)
+        return services.SentRef(f"{phone}@s.whatsapp.net", f"S{len(captions)}")
+
+    monkeypatch.setattr("app.main.send_whatsapp_pdf", spy)
+    ada = seeded_event(admin, event_id)
+    doorman.post(f"/attendees/{ada}/whatsapp")
+    assert captions and all(c.startswith(("Yo Ada", "Hey Ada")) for c in captions)
+    # language switch to Hebrew wording
+    admin.post("/settings/message", data={**form, "f.msg.lang": "he"})
+    assert ticket_caption("דנה לוי", "גמר", None).startswith("שלום דנה")
+
+
+def test_bad_placeholders_and_values_are_rejected_without_saving(admin):
+    from app import config as cfg
+    from app.messages import PARTS
+    before = list(PARTS["en"]["greet"])
+    r = admin.post("/settings/message", data={"f.msg.lang": "en", "f.msg.en.greet": "Hi {nmae}", "f.msg.en.body": "x"})
+    assert r.status_code == 422 and "unknown placeholder" in r.text and PARTS["en"]["greet"] == before
+    r = admin.post("/settings/message", data={"f.msg.lang": "en", "f.msg.en.greet": "", "f.msg.en.body": "x"})
+    assert r.status_code == 422 and "at least one line" in r.text
+    old = cfg.WHATSAPP_MIN_INTERVAL
+    for bad in ({"f.send.min_interval": "0.2"}, {"f.send.min_interval": "abc"}, {"f.send.long_pause_chance": "2"},
+                {"f.send.typing_ms.lo": "5000", "f.send.typing_ms.hi": "100"}):
+        assert admin.post("/settings/sending", data=bad).status_code == 422, bad
+    assert cfg.WHATSAPP_MIN_INTERVAL == old
+    assert admin.post("/settings/cleanup", data={"f.del.min_hours": "30", "f.del.max_hours": "20"}).status_code == 422
+    assert admin.post("/settings/site", data={"f.site.timezone": "Mars/Base"}).status_code == 422
+    assert admin.post("/settings/nope", data={}).status_code == 404
+
+
+def test_sending_constants_apply_immediately_and_reset(admin):
+    from app import config as cfg
+    r = admin.post("/settings/sending", data={"f.send.min_interval": "5", "f.send.jitter": "9", "f.send.long_pause_chance": "0.2",
+                                              "f.send.typing_ms.lo": "500", "f.send.typing_ms.hi": "900", "f.lines.daily_cap": "80",
+                                              "f.lines.min_working": "4", "f.lines.test_hours": "30"})
+    assert r.status_code == 200
+    assert (cfg.WHATSAPP_MIN_INTERVAL, cfg.WHATSAPP_JITTER, cfg.WHATSAPP_LONG_PAUSE_CHANCE) == (5.0, 9.0, 0.2)
+    assert cfg.WHATSAPP_TYPING_MS == (500, 900) and (cfg.LINE_DAILY_CAP, cfg.MIN_WORKING_LINES, cfg.LINE_TEST_HOURS_BEFORE) == (80, 4, 30.0)
+    admin.post("/settings/cleanup", data={"f.del.min_hours": "10", "f.del.max_hours": "20", "f.del.event_hours": "2"})   # both toggles unchecked = off
+    assert cfg.WHATSAPP_DELETE_ON_UNADMIT is False and cfg.WHATSAPP_DELETE_AFTER_EVENT is False and (cfg.WHATSAPP_DELETE_MIN_HOURS, cfg.WHATSAPP_DELETE_MAX_HOURS) == (10.0, 20.0)
+    r = admin.post("/settings/sending/reset")
+    assert "back to the defaults" in r.text and cfg.WHATSAPP_MIN_INTERVAL != 5.0 and cfg.WHATSAPP_TYPING_MS != (500, 900)
+
+
+def test_saved_settings_survive_a_restart(admin):
+    from app import config as cfg, site_settings
+    admin.post("/settings/sending", data={"f.send.min_interval": "6", "f.send.jitter": "1", "f.send.long_pause_chance": "0",
+                                          "f.send.typing_ms.lo": "100", "f.send.typing_ms.hi": "200", "f.lines.daily_cap": "50",
+                                          "f.lines.min_working": "3", "f.lines.test_hours": "24"})
+    cfg.WHATSAPP_MIN_INTERVAL = 1.0            # pretend the process restarted with the built-in defaults
+    with SessionLocal() as db:
+        site_settings.load_and_apply(db)
+    assert cfg.WHATSAPP_MIN_INTERVAL == 6.0 and cfg.LINE_DAILY_CAP == 50
+
+
+def test_event_form_lists_and_phone_defaults_are_editable(admin):
+    from app import data
+    r = admin.post("/settings/site", data={"f.site.country_code": "+44", "f.site.timezone": "Europe/London", "f.site.home_team": "Home FC",
+                                           "f.site.versus": "vs.", "f.site.opponents": "Team A\nTeam B\nTeam A", "f.site.default_location": "Main Hall",
+                                           "f.site.arenas": "Court 2\nCourt 3"})
+    assert r.status_code == 200, r.text
+    assert services.normalize_phone("07911 123456") == "447911123456"                 # new country code in use
+    assert data.OPPONENTS == ["Team A", "Team B"] and data.ARENAS == ["Main Hall", "Court 2", "Court 3"]
+    page = admin.get("/events").text
+    assert "Team B" in page and "Court 3" in page and 'value="Main Hall" selected' in page and "Home FC" in page
+    assert admin.post("/events", data={"opponent": "Team B", "event_date": "2031-05-01T20:00"}).status_code == 303
+    assert "Home FC vs. Team B" in admin.get("/events").text
+    admin.post("/settings/site/reset")
+    assert data.HOME_TEAM == "מכבי תל אביב" and "Court 2" not in data.ARENAS and services.normalize_phone("0521234567") == "972521234567"

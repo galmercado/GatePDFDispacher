@@ -24,7 +24,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import __version__, config, data, google_auth
+from . import __version__, config, data, google_auth, site_settings
 from .auth import (
     authenticate, clear_auth_cookie, create_access_token, get_current_user, hash_password,
     require_admin, require_staff, set_auth_cookie, verify_password,
@@ -184,6 +184,7 @@ async def lifespan(_app: FastAPI):
     init_db()
     seed_admin()
     with SessionLocal() as db:
+        site_settings.load_and_apply(db)
         linesmod.ensure_default_line(db)
     tasks = [asyncio.create_task(cleanup_loop()), asyncio.create_task(linesmod.pretest_loop())]
     try:
@@ -465,7 +466,7 @@ def create_event(
     request: Request,
     opponent: str = Form(...),
     opponent_other: str = Form(""),
-    location: str = Form(data.DEFAULT_LOCATION),
+    location: str = Form(""),
     location_other: str = Form(""),
     event_date: str = Form(...),
     user: User = Depends(require_admin),
@@ -473,7 +474,7 @@ def create_event(
 ):
     try:
         rival = pick(opponent, opponent_other, "opponent")
-        place = pick(location, location_other, "location")
+        place = pick(location or data.DEFAULT_LOCATION, location_other, "location")
         if not rival or not place:
             raise ValueError("Choose an opponent and a location.")
         when = datetime.fromisoformat(event_date)
@@ -1600,6 +1601,37 @@ def registration_receive(body: ReceivedTable, user: User = Depends(require_admin
         db.commit()
     msgs, warnings = run_import(db, event, parsed, source=f"Registration #{body.game_id}: " if body.game_id else "")
     return {"ok": True, "messages": msgs, "warnings": warnings, "manage_url": f"/events/{event.id}/manage"}
+
+
+# --------------------------------------------------------------------------- site settings (admin only)
+
+def settings_ctx(db: Session, user: User, **extra) -> dict:
+    return {"user": user, "groups": site_settings.groups(), "value": site_settings.current, "titles": site_settings.GROUPS,
+            "preview": site_settings.preview_messages(), "messages": [], "errors": [], **extra}
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return render(request, "settings.html", settings_ctx(db, user))
+
+
+@app.post("/settings/{group}", response_class=HTMLResponse)
+async def save_settings(group: str, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    if group not in site_settings.GROUPS:
+        raise HTTPException(404, "Unknown settings group")
+    form = dict((await request.form()).items())
+    errors = site_settings.save_group(db, group, form)
+    if errors:
+        return render(request, "settings.html", settings_ctx(db, user, errors=errors, open_group=group), status=422)
+    return render(request, "settings.html", settings_ctx(db, user, messages=[f"{site_settings.GROUPS[group]}: saved."], open_group=group))
+
+
+@app.post("/settings/{group}/reset", response_class=HTMLResponse)
+def reset_settings(group: str, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    if group not in site_settings.GROUPS:
+        raise HTTPException(404, "Unknown settings group")
+    site_settings.reset_group(db, group)
+    return render(request, "settings.html", settings_ctx(db, user, messages=[f"{site_settings.GROUPS[group]}: back to the defaults."], open_group=group))
 
 
 # --------------------------------------------------------------------------- users & account

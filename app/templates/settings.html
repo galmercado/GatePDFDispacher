@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Site settings{% endblock %}
+{% block content %}
+{% set field = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white outline-none focus:border-brand-400" %}
+<a href="/events" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-400 hover:text-white"><i class="ph ph-arrow-left"></i> Events</a>
+<h1 class="text-2xl font-bold text-white">Site settings</h1>
+<p class="mb-4 mt-1 text-sm text-slate-400">The main constants of the site, including the text sent with the tickets. Changes apply immediately and survive restarts; <i>Reset</i> returns a section to its built-in defaults.
+  WhatsApp numbers are managed on the <a href="/lines" class="text-brand-400 underline">Lines</a> page, member phone numbers on the <a href="/members" class="text-brand-400 underline">Members</a> page.</p>
+
+{% for m in messages %}<div class="mb-3 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200" role="status"><i class="ph-fill ph-check-circle"></i> {{ m }}</div>{% endfor %}
+{% if errors %}<div class="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert"><ul class="list-inside list-disc">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+
+{% for gid, title, items in groups %}
+<details class="mb-4 rounded-2xl border border-slate-800 bg-slate-900" {{ 'open' if (open_group == gid or (not open_group and loop.first)) }}>
+  <summary class="cursor-pointer list-none p-4 text-lg font-semibold text-white">{{ title }}</summary>
+  <form method="post" action="/settings/{{ gid }}" class="grid gap-4 border-t border-slate-800 p-4">
+    {% if gid == 'message' %}
+    <div class="rounded-xl bg-slate-950 p-3">
+      <p class="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">Preview of the saved wording (a new variation each time you reload)</p>
+      <ul class="space-y-2 text-sm text-slate-200">{% for p in preview %}<li class="whitespace-pre-line rounded-lg bg-slate-900 px-3 py-2" dir="auto">{{ p }}</li>{% endfor %}</ul>
+    </div>
+    <p class="text-sm text-slate-400">Each ticket message is assembled from one random line of each list below, so no two messages are the same. Write one option per line; put <code>{name}</code>, <code>{event}</code>, <code>{i}</code>/<code>{n}</code>, <code>{when}</code> where shown.</p>
+    {% endif %}
+    {% for s in items %}
+    <div>
+      {% if s.kind == 'bool' %}
+      <label class="flex items-center gap-3 text-sm text-slate-200"><input type="checkbox" name="f.{{ s.key }}" {{ 'checked' if value(s.key) }} class="h-5 w-5 rounded"> {{ s.label }}</label>
+      {% else %}
+      <label class="mb-1 block text-sm font-medium text-slate-200" for="f-{{ s.key }}">{{ s.label }}</label>
+      {% if s.kind == 'choice' %}
+      <select id="f-{{ s.key }}" name="f.{{ s.key }}" class="{{ field }}">{% for c in s.choices %}<option value="{{ c }}" {{ 'selected' if value(s.key) == c }}>{{ {'en': 'English', 'he': 'עברית (Hebrew)'}.get(c, c) }}</option>{% endfor %}</select>
+      {% elif s.kind == 'lines' %}
+      <textarea id="f-{{ s.key }}" name="f.{{ s.key }}" rows="{{ [3, [value(s.key)|length + 1, 8]|min]|max }}" dir="auto" class="{{ field }} font-mono text-sm">{{ value(s.key)|join('\n') }}</textarea>
+      {% elif s.kind == 'range' %}
+      <div class="flex items-center gap-2"><input name="f.{{ s.key }}.lo" value="{{ value(s.key)[0] }}" inputmode="numeric" class="{{ field }}"><span class="text-slate-500">to</span><input name="f.{{ s.key }}.hi" value="{{ value(s.key)[1] }}" inputmode="numeric" class="{{ field }}"></div>
+      {% else %}
+      <input id="f-{{ s.key }}" name="f.{{ s.key }}" value="{{ value(s.key) }}" {{ 'inputmode=decimal' if s.kind in ('int', 'float') }} dir="auto" class="{{ field }}">
+      {% endif %}
+      {% endif %}
+      {% if s.help %}<p class="mt-1 text-xs text-slate-500">{{ s.help }}</p>{% endif %}
+    </div>
+    {% endfor %}
+    <div class="flex gap-2">
+      <button class="flex-1 rounded-xl bg-brand-500 py-2.5 font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-floppy-disk"></i> Save</button>
+      <button formaction="/settings/{{ gid }}/reset" formnovalidate onclick="return confirm('Restore the defaults of “{{ title }}”?')" class="rounded-xl border border-slate-600 px-4 text-sm text-slate-300 hover:bg-slate-800">Reset</button>
+    </div>
+  </form>
+</details>
+{% endfor %}
+{% endblock %}
