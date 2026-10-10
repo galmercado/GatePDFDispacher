@@ -1,0 +1,25 @@
+<div class="mb-3 flex items-start justify-between gap-3">
+  <div class="min-w-0"><h2 class="truncate text-lg font-semibold text-white">{{ line.label }}</h2>
+    <p class="text-xs text-slate-400">{{ line.instance_name }}</p></div>
+  <button type="button" onclick="document.getElementById('line-modal').close()" class="text-slate-400 hover:text-white" aria-label="Close"><i class="ph ph-x text-xl"></i></button>
+</div>
+{% if connected %}
+<div class="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center text-emerald-200"><i class="ph-fill ph-check-circle text-3xl"></i><p class="mt-1 font-semibold">Connected</p></div>
+{% else %}
+<div hx-post="/lines/{{ line.id }}/connect" hx-trigger="every 12s" hx-target="#line-content" hx-swap="innerHTML" hx-include="#pair-number">
+  {% if error %}<div class="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">{{ error }}</div>{% endif %}
+  {% if qr %}
+  <div class="mb-2 rounded-2xl bg-white p-3"><img src="{{ qr }}" alt="WhatsApp QR code" class="mx-auto w-full max-w-[260px]"></div>
+  <p class="text-center text-xs text-slate-400">WhatsApp → Settings → Linked devices → Link a device. The code refreshes itself.</p>
+  {% endif %}
+  {% if pairing_code %}
+  <div class="my-3 rounded-xl bg-slate-950 p-3 text-center"><p class="text-xs text-slate-400">Or enter this code (Link with phone number instead):</p>
+    <p class="mt-1 text-2xl font-bold tracking-widest text-white">{{ pairing_code }}</p></div>
+  {% endif %}
+</div>
+<form hx-post="/lines/{{ line.id }}/connect" hx-target="#line-content" hx-swap="innerHTML" class="mt-3 flex gap-2">
+  <input id="pair-number" name="number" inputmode="tel" value="{{ line.phone or '' }}" placeholder="Phone number for a pairing code"
+         class="w-full min-w-0 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white">
+  <button class="shrink-0 rounded-xl bg-slate-800 px-3 text-sm font-semibold text-white hover:bg-slate-700">Get code</button>
+</form>
+{% endif %}

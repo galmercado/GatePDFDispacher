@@ -57,6 +57,13 @@ def migrate(bind: Engine) -> None:
     if "sent_messages" in names and "ticket_id" not in {c["name"] for c in insp.get_columns("sent_messages")}:
         with bind.begin() as conn:
             conn.execute(text("ALTER TABLE sent_messages ADD COLUMN ticket_id INTEGER"))
+    for table in ("sent_messages", "orphan_messages"):
+        if table in names and "line_id" not in {c["name"] for c in insp.get_columns(table)}:
+            with bind.begin() as conn:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN line_id INTEGER"))
+    if "events" in names and "lines_tested_at" not in {c["name"] for c in insp.get_columns("events")}:
+        with bind.begin() as conn:
+            conn.execute(text("ALTER TABLE events ADD COLUMN lines_tested_at DATETIME"))
     if "sent_messages" in insp.get_table_names():
         if "delete_at" not in {c["name"] for c in insp.get_columns("sent_messages")}:
             with bind.begin() as conn:

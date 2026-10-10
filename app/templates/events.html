@@ -10,6 +10,12 @@
   {% endif %}
 </div>
 
+{% if lines_alert %}
+<a href="/lines" class="mb-4 flex items-start gap-3 rounded-2xl border border-rose-500/50 bg-rose-500/10 p-4 text-rose-100 hover:bg-rose-500/15" role="alert">
+  <i class="ph-fill ph-warning text-2xl text-rose-300"></i>
+  <span><b>WhatsApp lines running low:</b> only {{ lines_alert.working }} of {{ lines_alert.total }} line(s) are working (minimum {{ lines_alert.minimum }}).
+    <span class="underline">Open the lines page</span> to connect or repair more before the next event.</span></a>
+{% endif %}
 {% for m in messages %}
 <div class="mb-4 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200" role="status"><i class="ph-fill ph-check-circle"></i> {{ m }}</div>
 {% endfor %}

@@ -40,6 +40,7 @@ class Event(Base):
     location: Mapped[str] = mapped_column(String(255), default="")
     event_date: Mapped[datetime] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    lines_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # pre-event WhatsApp line test done
 
     attendees: Mapped[list["Attendee"]] = relationship(
         back_populates="event", cascade="all, delete-orphan"
@@ -142,6 +143,7 @@ class SentMessage(Base):
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
     attendee_id: Mapped[int] = mapped_column(ForeignKey("attendees.id", ondelete="CASCADE"), index=True)
     ticket_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    line_id: Mapped[int | None] = mapped_column(Integer, nullable=True)   # which WhatsApp number sent it
     remote_jid: Mapped[str] = mapped_column(String(64))
     message_id: Mapped[str] = mapped_column(String(128))
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
@@ -172,6 +174,7 @@ class OrphanMessage(Base):
     __tablename__ = "orphan_messages"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    line_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     remote_jid: Mapped[str] = mapped_column(String(64))
     message_id: Mapped[str] = mapped_column(String(128))
     sent_at: Mapped[datetime] = mapped_column(DateTime)
@@ -179,3 +182,34 @@ class OrphanMessage(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     delete_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class WhatsAppLine(Base):
+    """One WhatsApp number = one Evolution API instance. Sending uses the first healthy line (by priority);
+    a line is switched to 'failed' when it errors while another line delivers the same message."""
+
+    __tablename__ = "whatsapp_lines"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    label: Mapped[str] = mapped_column(String(64))
+    instance_name: Mapped[str] = mapped_column(String(64), unique=True)
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)   # pending|active|failed|disabled
+    connection: Mapped[str] = mapped_column(String(16), default="unknown")           # open|connecting|close|missing|unknown
+    daily_cap: Mapped[int] = mapped_column(Integer, default=150)
+    sent_today: Mapped[int] = mapped_column(Integer, default=0)
+    sent_day: Mapped[str] = mapped_column(String(10), default="")
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_test_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")

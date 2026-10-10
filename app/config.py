@@ -26,8 +26,21 @@ DEFAULT_COUNTRY_CODE = re.sub(r"\D", "", os.getenv("DEFAULT_COUNTRY_CODE", "972"
 EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "event-door")
 # Anti-ban throttle: minimum gap between any two outgoing WhatsApp messages
 # (global across all users). Never allowed below 1 second.
-WHATSAPP_MIN_INTERVAL = max(1.0, float(os.getenv("WHATSAPP_MIN_INTERVAL", "1.5")))
-WHATSAPP_JITTER = max(0.0, float(os.getenv("WHATSAPP_JITTER", "0.5")))
+# Gap between two sends = MIN_INTERVAL + random(0, JITTER) seconds (hard floor 1 s), plus - now and then - a longer
+# "human" pause. Before each message Evolution also shows "typing..." for a random 1.2-3.8 s.
+WHATSAPP_MIN_INTERVAL = max(1.0, float(os.getenv("WHATSAPP_MIN_INTERVAL", "3.0")))
+WHATSAPP_JITTER = max(0.0, float(os.getenv("WHATSAPP_JITTER", "4.0")))
+WHATSAPP_LONG_PAUSE_CHANCE = min(1.0, max(0.0, float(os.getenv("WHATSAPP_LONG_PAUSE_CHANCE", "0.08"))))
+WHATSAPP_LONG_PAUSE = (6.0, 15.0)            # extra seconds on those occasional long pauses
+WHATSAPP_TYPING_MS = (1200, 3800)            # simulated typing time before each message
+WHATSAPP_MESSAGE_LANG = os.getenv("WHATSAPP_MESSAGE_LANG", "en")   # en | he
+
+# Several WhatsApp numbers ("lines") with automatic fail-over; managed on the admin-only Lines page.
+LINE_DAILY_CAP = int(os.getenv("LINE_DAILY_CAP", "150"))            # messages per line per day, then the next line is used
+MIN_WORKING_LINES = int(os.getenv("MIN_WORKING_LINES", "3"))        # admins see an alert below this
+WHATSAPP_TEST_NUMBER = re.sub(r"\D", "", os.getenv("WHATSAPP_TEST_NUMBER", ""))   # receives the pre-event line test
+LINE_TEST_HOURS_BEFORE = float(os.getenv("LINE_TEST_HOURS_BEFORE", "24"))
+LINE_TEST_GAP = (8.0, 25.0)                                          # random seconds between two line tests
 
 # Google sign-in (OAuth 2.0). Only users whose email is already in the Users list may sign in.
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()

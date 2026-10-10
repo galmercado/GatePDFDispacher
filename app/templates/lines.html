@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}WhatsApp lines{% endblock %}
+{% block content %}
+{% set field = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white outline-none focus:border-brand-400" %}
+{% set label = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" %}
+<a href="/events" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-400 hover:text-white"><i class="ph ph-arrow-left"></i> Events</a>
+<h1 class="text-2xl font-bold text-white">WhatsApp lines</h1>
+<p class="mb-4 mt-1 text-sm text-slate-400">Each line is one WhatsApp number. Tickets go out through the first working line; if it errors while another line delivers the same message, it is marked <b>not functioning</b> and the next line takes over.</p>
+
+<div class="mb-4 rounded-2xl border p-4 {{ 'border-rose-500/40 bg-rose-500/10' if summary.low else 'border-emerald-500/30 bg-emerald-500/10' }}">
+  <p class="text-lg font-semibold {{ 'text-rose-200' if summary.low else 'text-emerald-200' }}">
+    <i class="ph-fill {{ 'ph-warning' if summary.low else 'ph-check-circle' }}"></i>
+    {{ summary.working }} of {{ summary.total }} line(s) working</p>
+  <p class="text-sm text-slate-300">{% if summary.low %}Fewer than {{ minimum }} working lines - connect or repair more before the next event.{% else %}At least {{ minimum }} working lines, as required.{% endif %}</p>
+</div>
+
+{% for m in messages %}<div class="mb-3 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200" role="status"><i class="ph-fill ph-check-circle"></i> {{ m }}</div>{% endfor %}
+{% for e in errors %}<div class="mb-3 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert"><i class="ph-fill ph-warning-circle mt-0.5"></i><span>{{ e }}</span></div>{% endfor %}
+
+<section class="mb-4 grid gap-3 rounded-2xl border border-slate-800 bg-slate-900 p-4 sm:grid-cols-2">
+  <form method="post" action="/lines/settings">
+    <label class="{{ label }}" for="tn">Test number (receives the pre-event check)</label>
+    <div class="flex gap-2"><input id="tn" name="test_number" value="{{ test_number }}" inputmode="tel" placeholder="052-1234567" class="{{ field }}">
+      <button class="rounded-xl bg-slate-800 px-4 text-sm font-semibold text-white hover:bg-slate-700">Save</button></div>
+    <p class="mt-1 text-xs text-slate-500">{% if not test_number %}<span class="text-amber-300">Not set - tests only check the connection, no test message is sent.</span>{% else %}24 h before each event every line sends a short test message here.{% endif %}</p>
+  </form>
+  <div class="flex flex-wrap items-end gap-2">
+    <form method="post" action="/lines/test-all"><button class="flex items-center gap-2 rounded-xl bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-heartbeat"></i> Test all lines now</button></form>
+    <form method="post" action="/lines/bulk" onsubmit="return confirm('Create lines until there are {{ target }}? Each one then needs its QR scanned.')">
+      <button class="flex items-center gap-2 rounded-xl border border-slate-700 px-4 py-2.5 text-sm font-medium text-slate-200 hover:bg-slate-800"><i class="ph ph-stack-plus"></i> Top up to {{ target }} lines</button></form>
+  </div>
+</section>
+
+<details class="mb-4 rounded-2xl border border-slate-800 bg-slate-900">
+  <summary class="cursor-pointer list-none p-4 font-semibold text-white"><i class="ph ph-plus-circle text-brand-400"></i> Add one line</summary>
+  <form method="post" action="/lines" class="grid gap-3 border-t border-slate-800 p-4 sm:grid-cols-3">
+    <div><label class="{{ label }}">Name</label><input name="label" placeholder="e.g. Orange SIM" class="{{ field }}"></div>
+    <div><label class="{{ label }}">Phone (optional)</label><input name="phone" inputmode="tel" class="{{ field }}"></div>
+    <div><label class="{{ label }}">Daily limit</label><input name="daily_cap" inputmode="numeric" placeholder="150" class="{{ field }}"></div>
+    <button class="rounded-xl bg-brand-500 py-2.5 font-semibold text-white hover:bg-brand-600 sm:col-span-3">Create line</button>
+  </form>
+</details>
+
+<div class="space-y-3">
+{% for l in lines %}
+{% set tone = {'active': 'bg-emerald-500/15 text-emerald-300', 'pending': 'bg-slate-700 text-slate-300', 'failed': 'bg-rose-500/20 text-rose-300', 'disabled': 'bg-slate-800 text-slate-500'} %}
+{% set text = {'active': 'Working', 'pending': 'Not connected yet', 'failed': 'Not functioning', 'disabled': 'Disabled'} %}
+<article class="rounded-2xl border p-4 {{ 'border-rose-500/40 bg-rose-950/20' if l.status == 'failed' else 'border-slate-800 bg-slate-900' }}">
+  <div class="flex items-start justify-between gap-3">
+    <div class="min-w-0">
+      <h2 class="truncate font-semibold text-white">{{ l.label }}{% if loop.first and l.status == 'active' %} <span class="ml-1 rounded bg-brand-500/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-brand-400">first</span>{% endif %}</h2>
+      <p class="truncate text-xs text-slate-500">{{ l.instance_name }}{% if l.phone %} · +{{ l.phone }}{% endif %}</p>
+    </div>
+    <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold {{ tone[l.status] }}">{{ text[l.status] }}</span>
+  </div>
+  <dl class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-slate-400">
+    <div>Connection: <b class="text-slate-200">{{ l.connection }}</b></div>
+    <div>Today: <b class="text-slate-200">{{ l.today_count }}/{{ l.daily_cap }}</b></div>
+    <div>Last test: <b class="{{ 'text-emerald-300' if l.last_test_ok else ('text-rose-300' if l.last_test_ok is not none else 'text-slate-200') }}">{% if l.last_test_at %}{{ l.last_test_at.strftime('%d/%m %H:%M') }} UTC · {{ 'OK' if l.last_test_ok else 'failed' }}{% else %}never{% endif %}</b></div>
+    <div>Last used: <b class="text-slate-200">{{ l.last_used_at.strftime('%d/%m %H:%M') + ' UTC' if l.last_used_at else '-' }}</b></div>
+  </dl>
+  {% if l.last_error %}<p class="mt-2 rounded-lg bg-rose-500/10 px-2 py-1.5 text-xs text-rose-200">{{ l.last_error }}</p>{% endif %}
+  <div class="mt-3 flex flex-wrap gap-2 text-xs">
+    <button hx-post="/lines/{{ l.id }}/connect" hx-target="#line-content" hx-swap="innerHTML" class="flex items-center gap-1 rounded-lg bg-brand-500 px-3 py-1.5 font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-qr-code"></i> Connect / QR</button>
+    {% for action, text_, icon in [('test', 'Test', 'ph-heartbeat'), ('refresh', 'Refresh', 'ph-arrows-clockwise')] %}
+    <form method="post" action="/lines/{{ l.id }}/{{ action }}"><button class="flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 hover:bg-slate-800"><i class="ph {{ icon }}"></i> {{ text_ }}</button></form>
+    {% endfor %}
+    {% if l.status == 'failed' %}<form method="post" action="/lines/{{ l.id }}/reset"><button class="rounded-lg border border-emerald-500/40 px-3 py-1.5 text-emerald-300 hover:bg-emerald-500/10">Mark as working</button></form>{% endif %}
+    {% if not loop.first %}<form method="post" action="/lines/{{ l.id }}/primary"><button class="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800">Make first</button></form>{% endif %}
+    <form method="post" action="/lines/{{ l.id }}/toggle"><button class="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800">{{ 'Enable' if l.status == 'disabled' else 'Disable' }}</button></form>
+    <form method="post" action="/lines/{{ l.id }}/delete" onsubmit="return confirm('Remove this line and its Evolution instance?')"><button class="rounded-lg border border-rose-500/40 px-3 py-1.5 text-rose-300 hover:bg-rose-500/10"><i class="ph ph-trash"></i></button></form>
+  </div>
+</article>
+{% else %}
+<div class="rounded-2xl border border-dashed border-slate-700 p-8 text-center text-slate-400">No lines yet.</div>
+{% endfor %}
+</div>
+
+<dialog id="line-modal" class="w-[calc(100%-2rem)] max-w-sm rounded-2xl border border-slate-700 bg-slate-900 p-0 text-slate-200 backdrop:bg-black/70">
+  <div id="line-content" class="p-6"></div>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const lineModal = document.getElementById('line-modal');
+  document.body.addEventListener('htmx:afterSwap', (e) => { if (e.detail.target.id === 'line-content' && !lineModal.open) lineModal.showModal(); });
+  document.body.addEventListener('lineConnected', () => setTimeout(() => location.reload(), 1500));
+  lineModal.addEventListener('close', () => { document.getElementById('line-content').innerHTML = ''; });
+</script>
+{% endblock %}

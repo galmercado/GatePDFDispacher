@@ -26,12 +26,15 @@ from .auth import (
     authenticate, clear_auth_cookie, create_access_token, get_current_user, hash_password,
     require_admin, require_staff, set_auth_cookie, verify_password,
 )
+from . import lines as linesmod
 from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
-from .models import Attendee, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, Ticket, User, utcnow
+from .models import Attendee, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Ticket, User, utcnow
+from .messages import ticket_caption
 from .services import (
     AttendeeIn, ImportValidationError, describe_validation_error, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
     import_attendees,
+    evolution_connect, evolution_create_instance, evolution_delete_instance, evolution_state,
     event_ticket_dir, normalize_phone, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, ticket_status,
 )
 
@@ -82,8 +85,12 @@ def seed_admin() -> None:
 
 async def revoke_message(db: Session, msg: SentMessage | OrphanMessage) -> bool:
     """Delete one sent ticket message for everyone; record the outcome. Returns success."""
+    instance = None
+    if getattr(msg, "line_id", None):
+        line = db.get(WhatsAppLine, msg.line_id)
+        instance = line.instance_name if line else None
     try:
-        await delete_whatsapp_message(msg.remote_jid, msg.message_id)
+        await delete_whatsapp_message(msg.remote_jid, msg.message_id, instance=instance)
     except WhatsAppError as exc:
         msg.attempts += 1
         msg.delete_at = utcnow() + timedelta(minutes=random.uniform(*config.WHATSAPP_RETRY_MINUTES))
@@ -172,11 +179,14 @@ async def lifespan(_app: FastAPI):
     config.STORAGE_DIR.joinpath("tickets").mkdir(parents=True, exist_ok=True)
     init_db()
     seed_admin()
-    task = asyncio.create_task(cleanup_loop())
+    with SessionLocal() as db:
+        linesmod.ensure_default_line(db)
+    tasks = [asyncio.create_task(cleanup_loop()), asyncio.create_task(linesmod.pretest_loop())]
     try:
         yield
     finally:
-        task.cancel()
+        for task in tasks:
+            task.cancel()
 
 
 app = FastAPI(title="Gate - Event Ticketing & Door Vetting", lifespan=lifespan)
@@ -412,10 +422,18 @@ def logout():
 
 # --------------------------------------------------------------------------- events
 
+def lines_alert_for(db: Session, user: User) -> dict | None:
+    """Admins only: shown on the home page when fewer than MIN_WORKING_LINES WhatsApp lines work."""
+    if user.role != Role.admin:
+        return None
+    info = linesmod.line_summary(db)
+    return {**info, "minimum": config.MIN_WORKING_LINES} if info["low"] else None
+
+
 def events_ctx(db: Session, user: User, **extra) -> dict:
     events = db.query(Event).order_by(Event.event_date.desc()).all()
     return {"user": user, "events": events, "stats": {e.id: compute_stats(db, e.id) for e in events},
-            "error": None, "messages": [], "opponents": data.OPPONENTS, "arenas": data.ARENAS,
+            "error": None, "messages": [], "lines_alert": lines_alert_for(db, user), "opponents": data.OPPONENTS, "arenas": data.ARENAS,
             "default_location": data.DEFAULT_LOCATION, "OTHER": data.OTHER,
             "home_team": data.HOME_TEAM, "versus": data.VERSUS,
             "other_opponent": data.OTHER_LABEL_OPPONENT, "other_location": data.OTHER_LABEL_LOCATION, **extra}
@@ -616,7 +634,7 @@ def delete_event(event_id: int, request: Request, user: User = Depends(require_a
     name = event.name
     live = db.query(SentMessage).filter(SentMessage.event_id == event.id, SentMessage.status == "sent").all()
     for msg in live:
-        db.add(OrphanMessage(remote_jid=msg.remote_jid, message_id=msg.message_id, sent_at=msg.sent_at,
+        db.add(OrphanMessage(line_id=msg.line_id, remote_jid=msg.remote_jid, message_id=msg.message_id, sent_at=msg.sent_at,
                              delete_at=msg.delete_at or schedule_delete_at(event), attempts=msg.attempts))
     for model in (SentMessage, SpareTicket, ImportIssue, Ticket):
         db.query(model).filter(model.event_id == event.id).delete()
@@ -812,18 +830,20 @@ def mark_delivered(db: Session, tickets: list[Ticket]) -> None:
 
 
 async def send_tickets(db: Session, attendee: Attendee, event: Event, tickets: list[Ticket]) -> list[Ticket]:
-    """Send these tickets over WhatsApp one by one; returns the ones that went out (stops at the first failure,
-    raising WhatsAppError only if nothing was sent)."""
+    """Send these tickets over WhatsApp one by one (varied wording, best available line with fail-over);
+    returns the ones that went out. Raises WhatsAppError only if nothing was sent."""
     sent: list[Ticket] = []
+    total = len(attendee.tickets)
     try:
         for ticket in tickets:
-            ref = await send_whatsapp_pdf(
-                attendee.phone, ticket.file_path,
-                caption=f"Hi {attendee.name.split()[0]}, here is your ticket for {event.name}.",
-                file_name=f"ticket-{ticket.page_number}.pdf",
+            ref, line = await linesmod.deliver_pdf(
+                db, attendee.phone, ticket.file_path,
+                caption=ticket_caption(attendee.name, event.name, event.event_date,
+                                       index=attendee.tickets.index(ticket) + 1, total=total),
+                file_name=f"ticket-{ticket.page_number}.pdf", sender=send_whatsapp_pdf,
             )
             if ref:  # remember it: deleted on un-admit, or at a random time after the event
-                db.add(SentMessage(event_id=event.id, attendee_id=attendee.id, ticket_id=ticket.id,
+                db.add(SentMessage(event_id=event.id, attendee_id=attendee.id, ticket_id=ticket.id, line_id=line.id,
                                    remote_jid=ref.remote_jid, message_id=ref.message_id,
                                    delete_at=schedule_delete_at(event)))
             ticket.delivered_at = utcnow()
@@ -1057,6 +1077,194 @@ def open_ticket_pdf(token: str, db: Session = Depends(get_db)):
 @app.get("/tickets/claim/{token}/download")
 def download_ticket(token: str, db: Session = Depends(get_db)):
     return ticket_pdf_response(db, token, "attachment")
+
+
+# --------------------------------------------------------------------------- WhatsApp lines (admin only)
+
+TARGET_LINES = 10
+
+
+def lines_ctx(db: Session, user: User, **extra) -> dict:
+    lines = db.query(WhatsAppLine).order_by(WhatsAppLine.priority, WhatsAppLine.id).all()
+    today = utcnow().date().isoformat()
+    for line in lines:      # counters of a previous day read as 0
+        line.today_count = line.sent_today if line.sent_day == today else 0
+    info = linesmod.line_summary(db)
+    return {"user": user, "lines": lines, "summary": info, "minimum": config.MIN_WORKING_LINES,
+            "test_number": linesmod.test_number(db), "target": TARGET_LINES, "messages": [], "errors": [], **extra}
+
+
+def get_line_or_404(db: Session, line_id: int) -> WhatsAppLine:
+    line = db.get(WhatsAppLine, line_id)
+    if line is None:
+        raise HTTPException(404, "Line not found")
+    return line
+
+
+def next_instance_name(db: Session) -> str:
+    existing = {n for (n,) in db.query(WhatsAppLine.instance_name)}
+    i = len(existing) + 1
+    while f"{config.EVOLUTION_INSTANCE}-{i}" in existing:
+        i += 1
+    return f"{config.EVOLUTION_INSTANCE}-{i}"
+
+
+async def create_line(db: Session, label: str, cap: int, phone: str = "") -> WhatsAppLine:
+    """Create the Evolution instance and the line record (status 'pending' until the phone is linked)."""
+    name = next_instance_name(db)
+    await evolution_create_instance(name)
+    last = db.query(func.max(WhatsAppLine.priority)).scalar() or 0
+    line = WhatsAppLine(label=label, instance_name=name, phone=normalize_phone(phone) if phone else None,
+                        priority=last + 1, status="pending", daily_cap=cap)
+    db.add(line)
+    db.commit()
+    return line
+
+
+@app.get("/lines", response_class=HTMLResponse)
+def lines_page(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return render(request, "lines.html", lines_ctx(db, user))
+
+
+@app.post("/lines", response_class=HTMLResponse)
+async def add_line(request: Request, label: str = Form(""), daily_cap: str = Form(""), phone: str = Form(""),
+                   user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    label = " ".join(label.split())[:64] or f"Line {db.query(WhatsAppLine).count() + 1}"
+    try:
+        cap = int(daily_cap) if daily_cap.strip() else config.LINE_DAILY_CAP
+        if not 1 <= cap <= 5000:
+            raise ValueError
+    except ValueError:
+        return render(request, "lines.html", lines_ctx(db, user, errors=["Daily limit must be a number between 1 and 5000."]), status=422)
+    try:
+        line = await create_line(db, label, cap, phone)
+    except WhatsAppError as exc:
+        return render(request, "lines.html", lines_ctx(db, user, errors=[f"Could not create the line: {exc}"]), status=422)
+    return render(request, "lines.html", lines_ctx(db, user, messages=[
+        f"Added “{line.label}”. Press Connect and scan its QR code with the phone that holds this number."]))
+
+
+@app.post("/lines/bulk", response_class=HTMLResponse)
+async def add_lines_bulk(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Top up to TARGET_LINES (10) lines so there are always spares ready; each still needs its QR scan."""
+    made, errors = 0, []
+    while db.query(WhatsAppLine).count() < TARGET_LINES:
+        try:
+            await create_line(db, f"Line {db.query(WhatsAppLine).count() + 1}", config.LINE_DAILY_CAP)
+            made += 1
+        except WhatsAppError as exc:
+            errors.append(f"Stopped after {made} new line(s): {exc}")
+            break
+    msgs = [f"Created {made} line(s). Connect each one by scanning its QR code."] if made else ["There are already {0} lines.".format(TARGET_LINES)]
+    return render(request, "lines.html", lines_ctx(db, user, messages=msgs, errors=errors), status=422 if errors else 200)
+
+
+@app.post("/lines/settings", response_class=HTMLResponse)
+def lines_settings(request: Request, test_number: str = Form(""), user: User = Depends(require_admin),
+                   db: Session = Depends(get_db)):
+    digits = normalize_phone(test_number) if test_number.strip() else ""
+    if test_number.strip() and not 8 <= len(digits) <= 15:
+        return render(request, "lines.html", lines_ctx(db, user, errors=["That test number does not look valid."]), status=422)
+    linesmod.set_setting(db, "test_number", digits)
+    return render(request, "lines.html", lines_ctx(db, user, messages=["Test number saved." if digits else "Test number cleared."]))
+
+
+@app.post("/lines/test-all", response_class=HTMLResponse)
+async def test_all_lines(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    result = await linesmod.run_line_tests(db)
+    return render(request, "lines.html", lines_ctx(db, user, messages=[
+        f"Tested all lines: {result['ok']} working, {result['bad']} not working."]))
+
+
+@app.post("/lines/{line_id}/test", response_class=HTMLResponse)
+async def test_one_line(line_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    line = get_line_or_404(db, line_id)
+    ok = await linesmod.test_line(db, line)
+    msg = f"{line.label}: working." if ok else f"{line.label}: {line.last_error}"
+    return render(request, "lines.html", lines_ctx(db, user, **({"messages": [msg]} if ok else {"errors": [msg]})))
+
+
+@app.post("/lines/{line_id}/refresh", response_class=HTMLResponse)
+async def refresh_line(line_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    line = get_line_or_404(db, line_id)
+    try:
+        line.connection = await evolution_state(line.instance_name)
+        if line.connection == "open" and line.status == "pending":
+            line.status = "active"
+        db.commit()
+    except WhatsAppError as exc:
+        return render(request, "lines.html", lines_ctx(db, user, errors=[f"{line.label}: {exc}"]), status=422)
+    return render(request, "lines.html", lines_ctx(db, user, messages=[f"{line.label}: connection is “{line.connection}”."]))
+
+
+@app.post("/lines/{line_id}/connect", response_class=HTMLResponse)
+async def connect_line(line_id: int, request: Request, number: str = Form(""), user: User = Depends(require_admin),
+                       db: Session = Depends(get_db)):
+    """Popup content: QR code (refreshed every few seconds) or pairing code; closes itself once linked."""
+    line = get_line_or_404(db, line_id)
+    ctx = {"line": line, "connected": False, "qr": "", "pairing_code": "", "error": ""}
+    try:
+        state = await evolution_state(line.instance_name)
+        if state == "missing":
+            await evolution_create_instance(line.instance_name)
+            state = "connecting"
+        line.connection = state
+        if state == "open":
+            if line.status == "pending":
+                line.status = "active"
+            db.commit()
+            return render(request, "partials/line_qr.html", {**ctx, "connected": True},
+                          headers={"HX-Trigger": json.dumps({"lineConnected": ""})})
+        info = await evolution_connect(line.instance_name, number or line.phone)
+        db.commit()
+        ctx.update(qr=info["qr"], pairing_code=info["pairing_code"])
+        if not info["qr"] and not info["pairing_code"]:
+            ctx["error"] = "WhatsApp has not produced a QR code yet - it is retried automatically."
+    except WhatsAppError as exc:
+        ctx["error"] = str(exc)
+    return render(request, "partials/line_qr.html", ctx)
+
+
+@app.post("/lines/{line_id}/toggle", response_class=HTMLResponse)
+def toggle_line(line_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    line = get_line_or_404(db, line_id)
+    if line.status == "disabled":
+        line.status = "active" if line.connection == "open" else "pending"
+        msg = f"{line.label} enabled."
+    else:
+        line.status, msg = "disabled", f"{line.label} disabled - it will not be used."
+    db.commit()
+    return render(request, "lines.html", lines_ctx(db, user, messages=[msg]))
+
+
+@app.post("/lines/{line_id}/reset", response_class=HTMLResponse)
+def reset_line(line_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    line = get_line_or_404(db, line_id)
+    line.status, line.last_error, line.failed_at = "active", None, None
+    db.commit()
+    return render(request, "lines.html", lines_ctx(db, user, messages=[f"{line.label} marked as working again."]))
+
+
+@app.post("/lines/{line_id}/primary", response_class=HTMLResponse)
+def make_primary(line_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    line = get_line_or_404(db, line_id)
+    first = db.query(func.min(WhatsAppLine.priority)).scalar() or 1
+    line.priority = first - 1
+    db.commit()
+    return render(request, "lines.html", lines_ctx(db, user, messages=[f"{line.label} is now the first line used."]))
+
+
+@app.post("/lines/{line_id}/delete", response_class=HTMLResponse)
+async def delete_line(line_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    line = get_line_or_404(db, line_id)
+    label, errors = line.label, []
+    try:
+        await evolution_delete_instance(line.instance_name)
+    except WhatsAppError as exc:
+        errors.append(f"The instance could not be removed from Evolution ({exc}); the line was removed here anyway.")
+    db.delete(line)
+    db.commit()
+    return render(request, "lines.html", lines_ctx(db, user, messages=[f"Removed {label}."], errors=errors))
 
 
 # --------------------------------------------------------------------------- users & account

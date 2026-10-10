@@ -457,7 +457,7 @@ def test_whatsapp_endpoint_success_and_failure(admin, doorman, event_id, monkeyp
     ada = seeded_event(admin, event_id)
     sent = []
 
-    async def ok(phone, path, caption, file_name="t.pdf", client=None):
+    async def ok(phone, path, caption, file_name="t.pdf", client=None, instance=None):
         sent.append((phone, Path(path).name))
 
     monkeypatch.setattr("app.main.send_whatsapp_pdf", ok)
@@ -840,13 +840,13 @@ def wa(monkeypatch):
     """Fake gateway: records sends and deletes; deletes can be made to fail."""
     state = {"sent": [], "deleted": [], "fail_delete": False, "n": 0}
 
-    async def send(phone, path, caption, file_name="t.pdf", client=None):
+    async def send(phone, path, caption, file_name="t.pdf", client=None, instance=None):
         state["n"] += 1
         ref = services.SentRef(f"{phone}@s.whatsapp.net", f"MSG{state['n']}")
         state["sent"].append(ref.message_id)
         return ref
 
-    async def delete(remote_jid, message_id, client=None):
+    async def delete(remote_jid, message_id, client=None, instance=None):
         if state["fail_delete"]:
             raise services.WhatsAppError("gateway down")
         state["deleted"].append(message_id)
@@ -1313,3 +1313,269 @@ def test_migration_adds_partial_entry_columns(tmp_path):
         rows = c.execute(text("SELECT name, admitted_adult, admitted_youth FROM attendees ORDER BY id")).all()
         c.execute(text("SELECT delivered_at FROM tickets")); c.execute(text("SELECT ticket_id FROM sent_messages"))
     assert [tuple(r) for r in rows] == [("In", 2, 1), ("Out", 0, 0)]
+
+
+# ----------------------------------------------------------------- WhatsApp lines, wording, jitter
+
+def test_ticket_text_varies_and_never_looks_like_a_placeholder():
+    from datetime import datetime
+    from app.messages import ticket_caption
+    when = datetime(2030, 3, 1, 20, 30)
+    texts = [ticket_caption("Dana Levi", "Maccabi vs. Holon", when, index=1, total=2, lang="en") for _ in range(200)]
+    assert len(set(texts)) > 150                                      # almost every message is different
+    assert all("Dana" in t and "Maccabi vs. Holon" in t and "{" not in t and "}" not in t for t in texts)
+    he = [ticket_caption("דנה לוי", "מכבי נגד חולון", when, lang="he") for _ in range(100)]
+    assert len(set(he)) > 50 and all("דנה" in t and "{" not in t for t in he)
+    assert all(not a == b for a, b in zip(texts, texts[1:]))          # never the same twice in a row
+
+
+def test_send_gap_has_random_jitter_and_a_floor(monkeypatch):
+    import asyncio
+    gaps = []
+
+    async def fake_sleep(sec):
+        gaps.append(sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(config, "WHATSAPP_MIN_INTERVAL", 3.0)
+    monkeypatch.setattr(config, "WHATSAPP_JITTER", 4.0)
+    monkeypatch.setattr(config, "WHATSAPP_LONG_PAUSE_CHANCE", 0.0)
+    th = services._SendThrottle()
+
+    async def go():
+        for _ in range(60):
+            th.done()
+            await th.wait_turn()
+
+    asyncio.run(go())
+    assert all(3.0 - 0.05 <= g <= 7.0 for g in gaps) and len(set(round(g, 2) for g in gaps)) > 40
+    assert config.WHATSAPP_MIN_INTERVAL >= 1.0
+
+
+def test_typing_delay_is_sent_with_each_message(tmp_path):
+    import asyncio
+    pdf = tmp_path / "t.pdf"
+    pdf.write_bytes(make_pdf(1))
+    seen = []
+
+    def handler(request: httpx.Request):
+        seen.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(201, json={"key": {"remoteJid": "x@s.whatsapp.net", "id": "A"}})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            await services.send_whatsapp_pdf("0501234567", pdf, "hi", client=c, instance="line-7")
+            await services.send_whatsapp_text("0501234567", "hi", instance="line-7", client=c)
+
+    asyncio.run(go())
+    assert seen[0][0].endswith("/message/sendMedia/line-7") and seen[1][0].endswith("/message/sendText/line-7")
+    assert all(config.WHATSAPP_TYPING_MS[0] <= body["delay"] <= config.WHATSAPP_TYPING_MS[1] for _, body in seen)
+
+
+@pytest.fixture()
+def lines3(monkeypatch):
+    """Three fresh lines (the default 'Main' is removed) and a sender that errors on chosen instances."""
+    from app.models import WhatsAppLine
+    with SessionLocal() as db:
+        db.query(WhatsAppLine).delete()
+        for i in (1, 2, 3):
+            db.add(WhatsAppLine(label=f"L{i}", instance_name=f"inst-{i}", priority=i, status="active", daily_cap=150))
+        db.commit()
+    state = {"calls": [], "bad": {}, "n": 0}
+
+    async def send(phone, path, caption, file_name="t.pdf", client=None, instance=None):
+        state["calls"].append(instance)
+        if instance in state["bad"]:
+            raise services.WhatsAppError(state["bad"][instance][1], status_code=state["bad"][instance][0])
+        state["n"] += 1
+        return services.SentRef(f"{phone}@s.whatsapp.net", f"M{state['n']}")
+
+    monkeypatch.setattr("app.main.send_whatsapp_pdf", send)
+    yield state
+    with SessionLocal() as db:
+        db.query(WhatsAppLine).delete()
+        db.commit()
+        from app.lines import ensure_default_line
+        ensure_default_line(db)
+
+
+def line_status():
+    from app.models import WhatsAppLine
+    with SessionLocal() as db:
+        return {l.label: l.status for l in db.query(WhatsAppLine).order_by(WhatsAppLine.id)}
+
+
+def test_failover_marks_lines_only_when_another_line_delivers(admin, doorman, event_id, lines3):
+    ada = seeded_event(admin, event_id)
+    lines3["bad"] = {"inst-1": (500, "Internal Server Error"), "inst-2": (500, "Internal Server Error")}
+    r = doorman.post(f"/attendees/{ada}/whatsapp")
+    assert "Sent 2 tickets" in r.headers["HX-Trigger"]
+    assert lines3["calls"][:3] == ["inst-1", "inst-2", "inst-3"]
+    assert line_status() == {"L1": "failed", "L2": "failed", "L3": "active"}
+    lines3["calls"].clear()
+    doorman.post(f"/attendees/{ada}/whatsapp")                         # failed lines are skipped from now on
+    assert set(lines3["calls"]) == {"inst-3"}
+    assert {m.line_id is not None for m in sent_rows(ada).values()} == {True}
+
+
+def test_a_bad_recipient_or_total_outage_marks_nothing(admin, doorman, event_id, lines3):
+    ada = seeded_event(admin, event_id)
+    lines3["bad"] = {"inst-1": (400, "number is not on WhatsApp")}      # 4xx: the recipient, not the line
+    r = doorman.post(f"/attendees/{ada}/whatsapp")
+    assert "WhatsApp failed" in r.headers["HX-Trigger"] and lines3["calls"] == ["inst-1"]
+    assert set(line_status().values()) == {"active"}
+    lines3["bad"] = {f"inst-{i}": (500, "boom") for i in (1, 2, 3)}     # everything 500s -> not provably the lines
+    lines3["calls"].clear()
+    r = doorman.post(f"/attendees/{ada}/whatsapp")
+    assert "All 3 WhatsApp line(s) failed" in r.headers["HX-Trigger"]
+    assert set(line_status().values()) == {"active"}
+
+
+def test_daily_cap_moves_to_the_next_line(admin, doorman, event_id, lines3):
+    from app.models import WhatsAppLine
+    ada = seeded_event(admin, event_id)
+    with SessionLocal() as db:
+        l1 = db.query(WhatsAppLine).filter_by(label="L1").one()
+        l1.daily_cap = 1
+        db.commit()
+    doorman.post(f"/attendees/{ada}/whatsapp")                          # 2 tickets: first on L1 (cap reached), second on L2
+    assert lines3["calls"] == ["inst-1", "inst-2"]
+    with SessionLocal() as db:
+        assert db.query(WhatsAppLine).filter_by(label="L1").one().sent_today == 1
+
+
+def test_no_working_line_gives_a_clear_error(admin, doorman, event_id, lines3):
+    from app.models import WhatsAppLine
+    ada = seeded_event(admin, event_id)
+    with SessionLocal() as db:
+        db.query(WhatsAppLine).update({"status": "failed"})
+        db.commit()
+    r = doorman.post(f"/attendees/{ada}/whatsapp")
+    assert "No working WhatsApp line" in r.headers["HX-Trigger"]
+
+
+def test_deleting_a_message_uses_the_line_that_sent_it(admin, doorman, event_id, lines3, monkeypatch):
+    ada = seeded_event(admin, event_id)
+    lines3["bad"] = {"inst-1": (500, "boom")}
+    doorman.post(f"/attendees/{ada}/whatsapp")                          # sent through inst-2
+    used = []
+
+    async def delete(remote_jid, message_id, client=None, instance=None):
+        used.append(instance)
+
+    monkeypatch.setattr("app.main.delete_whatsapp_message", delete)
+    toggle(doorman, ada)
+    assert used == ["inst-2", "inst-2"]
+
+
+def test_line_tests_mark_working_and_broken_lines(lines3, monkeypatch):
+    import asyncio
+    from app.lines import run_line_tests, set_setting
+    monkeypatch.setattr(config, "LINE_TEST_GAP", (0.0, 0.0))
+    sent = []
+
+    async def state(name, client=None):
+        return {"inst-1": "open", "inst-2": "close", "inst-3": "open"}[name]
+
+    async def text(number, body, instance=None, client=None):
+        sent.append((number, instance))
+        if instance == "inst-3":
+            raise services.WhatsAppError("limited", status_code=500)
+
+    async def go():
+        with SessionLocal() as db:
+            set_setting(db, "test_number", "972501112222")
+            return await run_line_tests(db, state_fn=state, text_fn=text)
+
+    assert asyncio.run(go()) == {"ok": 1, "bad": 2}
+    assert line_status() == {"L1": "active", "L2": "failed", "L3": "failed"}
+    assert sent == [("972501112222", "inst-1"), ("972501112222", "inst-3")]      # the disconnected line gets no message
+    # a repaired line comes back on its own at the next test
+    async def state_ok(name, client=None):
+        return "open"
+
+    async def text_ok(number, body, instance=None, client=None):
+        pass
+
+    async def again():
+        with SessionLocal() as db:
+            return await run_line_tests(db, state_fn=state_ok, text_fn=text_ok)
+
+    assert asyncio.run(again()) == {"ok": 3, "bad": 0} and set(line_status().values()) == {"active"}
+
+
+def test_pretest_runs_once_24_hours_before_an_event(lines3, monkeypatch):
+    import asyncio
+    from datetime import timedelta
+    from app.lines import event_start_utc, pretest_due_events
+    from app.models import Event, utcnow
+    monkeypatch.setattr(config, "LINE_TEST_GAP", (0.0, 0.0))
+    calls = []
+
+    async def state(name, client=None):
+        calls.append(name)
+        return "open"
+
+    async def text(number, body, instance=None, client=None):
+        pass
+
+    with SessionLocal() as db:
+        soon = Event(name="soon", location="x", event_date=utcnow() + timedelta(hours=20))
+        later = Event(name="later", location="x", event_date=utcnow() + timedelta(days=3))
+        db.add_all([soon, later])
+        db.commit()
+        soon_id, later_id = soon.id, later.id
+    asyncio.run(pretest_due_events(state_fn=state, text_fn=text))
+    assert len(calls) == 3                                               # three lines, once
+    asyncio.run(pretest_due_events(state_fn=state, text_fn=text))
+    assert len(calls) == 3                                               # not repeated
+    with SessionLocal() as db:
+        assert db.get(Event, soon_id).lines_tested_at is not None and db.get(Event, later_id).lines_tested_at is None
+    asyncio.run(pretest_due_events(now=utcnow() + timedelta(days=2, hours=2), state_fn=state, text_fn=text))
+    assert len(calls) == 6                                               # the later event, 24 h before its start
+
+
+def test_low_line_alert_is_for_admins_only(admin, doorman, lines3):
+    from app.models import WhatsAppLine
+    assert "WhatsApp lines running low" not in admin.get("/events").text      # 3 working = enough
+    with SessionLocal() as db:
+        db.query(WhatsAppLine).filter_by(label="L3").update({"status": "failed"})
+        db.commit()
+    page = admin.get("/events").text
+    assert "WhatsApp lines running low" in page and "only 2 of 3" in page
+    assert "WhatsApp lines running low" not in doorman.get("/events").text
+
+
+def test_lines_manager_is_admin_only_and_manages_lines(admin, doorman, lines3, monkeypatch):
+    created = []
+
+    async def create(name, client=None):
+        created.append(name)
+
+    async def delete_inst(name, client=None):
+        created.append(f"deleted:{name}")
+
+    monkeypatch.setattr("app.main.evolution_create_instance", create)
+    monkeypatch.setattr("app.main.evolution_delete_instance", delete_inst)
+    assert doorman.get("/lines").status_code == 403 and doorman.post("/lines/test-all").status_code == 403
+    assert TestClient(app, follow_redirects=False).get("/lines").status_code == 303
+    page = admin.get("/lines").text
+    assert "3 of 3 line(s) working" in page and "L1" in page
+    r = admin.post("/lines", data={"label": "Spare SIM", "daily_cap": "80", "phone": "052-9999999"})
+    assert r.status_code == 200 and "Added “Spare SIM”" in r.text and created == ["event-door-4"]
+    assert admin.post("/lines", data={"label": "x", "daily_cap": "abc"}).status_code == 422
+    r = admin.post("/lines/bulk")
+    assert "Created 6 line(s)" in r.text and len(created) == 7                          # topped up to 10
+    from app.models import WhatsAppLine
+    with SessionLocal() as db:
+        assert db.query(WhatsAppLine).count() == 10
+        spare = db.query(WhatsAppLine).filter_by(label="Spare SIM").one()
+        assert (spare.status, spare.daily_cap, spare.phone) == ("pending", 80, "972529999999")
+        sid = spare.id
+    assert "disabled" in admin.post(f"/lines/{sid}/toggle").text
+    admin.post(f"/lines/{sid}/primary")
+    with SessionLocal() as db:
+        assert db.get(WhatsAppLine, sid).priority < 1
+    assert "Test number saved" in admin.post("/lines/settings", data={"test_number": "052-1234567"}).text
+    assert admin.post("/lines/settings", data={"test_number": "12"}).status_code == 422
+    assert "Removed Spare SIM" in admin.post(f"/lines/{sid}/delete").text and f"deleted:event-door-4" in created

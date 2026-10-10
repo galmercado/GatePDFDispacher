@@ -106,6 +106,25 @@ the event can no longer be deleted afterwards. Evolution API does not expose Wha
 one-to-one chats, which is why the app does the deleting itself. Guests see "This message was deleted". Only messages sent after
 this feature was deployed can be deleted.
 
+## WhatsApp lines (several numbers, fail-over)
+
+Admins get a **Lines** page (SIM-card icon in the header). Each line is one WhatsApp number = one Evolution instance:
+- **Add one line / Top up to 10 lines** creates the Evolution instances; press **Connect / QR** on a line and scan its QR code
+  (or use a pairing code) with the phone that holds that number. Your original `EVOLUTION_INSTANCE` is registered as line "Main".
+- Tickets go out through the first working line (**Make first** reorders). Every line has a daily limit (`LINE_DAILY_CAP`, default 150);
+  when it is reached the next line is used.
+- **Fail-over:** if a line errors with HTTP 5xx / a dropped session, the same message is retried on the next line. Only if that
+  next line *delivers* is the first one marked **Not functioning** - so one bad guest number can never mark every line as dead. A 4xx
+  (bad recipient) or an outage on all lines marks nothing.
+- **24 h before every event** each line is tested (connection check, plus a short message to the **test number** you set on the Lines page).
+  A line that recovers is switched back to Working by the next test. **Test all lines now** runs it on demand.
+- With fewer than `MIN_WORKING_LINES` (3) working lines, admins see a red alert on the home page.
+
+**Looking less like a bot**: every ticket text is assembled from interchangeable parts (greeting, wording, optional date line, closing,
+emoji; English or Hebrew via `WHATSAPP_MESSAGE_LANG`) so no two messages are the same; the gap between messages is `WHATSAPP_MIN_INTERVAL`
++ random jitter (+ the occasional longer pause), Evolution shows "typing..." for a random 1-4 s before each message, and each number is
+capped per day. WhatsApp's terms do not allow unofficial clients - the durable fix is the official WhatsApp Business Platform.
+
 ## Deploy to Oracle Cloud Always-Free (ARM)
 
 Result: `https://tickets.your-domain` served by Caddy (automatic HTTPS), app + Evolution + Postgres in Docker on an

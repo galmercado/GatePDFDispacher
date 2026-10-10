@@ -496,7 +496,17 @@ def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = F
 # --------------------------------------------------------------------------- WhatsApp
 
 class WhatsAppError(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+    @property
+    def line_problem(self) -> bool:
+        """Looks like trouble with the *sending number* (HTTP 5xx, dropped session) rather than with
+        the message or the recipient (4xx)."""
+        text = str(self).lower()
+        return bool((self.status_code or 0) >= 500
+                    or re.search(r"connection closed|not connected|disconnected|logged out|timed out|timeout", text))
 
 
 def describe_gateway_error(resp: httpx.Response) -> str:
@@ -539,6 +549,8 @@ class _SendThrottle:
 
     async def wait_turn(self) -> None:
         gap = config.WHATSAPP_MIN_INTERVAL + random.uniform(0, config.WHATSAPP_JITTER)
+        if random.random() < config.WHATSAPP_LONG_PAUSE_CHANCE:      # an occasional longer, human-looking pause
+            gap += random.uniform(*config.WHATSAPP_LONG_PAUSE)
         remaining = self._last_done + gap - time.monotonic()
         if remaining > 0:
             await asyncio.sleep(remaining)
@@ -555,32 +567,41 @@ class SentRef(NamedTuple):
     message_id: str
 
 
-async def _gateway_call(method: str, path: str, payload: dict, client: httpx.AsyncClient | None) -> httpx.Response:
-    """One throttled call to Evolution API (every send/delete shares the same minimum gap)."""
+async def _gateway_call(method: str, path: str, payload: dict | None, client: httpx.AsyncClient | None,
+                        instance: str | None = None, throttled: bool = True) -> httpx.Response:
+    """One call to Evolution API. Calls that talk to WhatsApp (send/delete) are throttled and share the
+    same randomised gap; pure management calls (instance state, create ...) are not."""
     if not config.EVOLUTION_API_KEY:
         raise WhatsAppError("EVOLUTION_API_KEY is not configured")
-    url = f"{config.EVOLUTION_API_URL}{path}/{config.EVOLUTION_INSTANCE}"
+    url = f"{config.EVOLUTION_API_URL}{path}"
+    if instance != "":
+        url += f"/{instance or config.EVOLUTION_INSTANCE}"
     headers = {"apikey": config.EVOLUTION_API_KEY, "Content-Type": "application/json"}
     owns_client = client is None
     client = client or httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=5.0))
     try:
-        async with throttle.lock():
-            await throttle.wait_turn()
+        if throttled:
+            async with throttle.lock():
+                await throttle.wait_turn()
+                try:
+                    resp = await client.request(method, url, json=payload, headers=headers)
+                except httpx.HTTPError as exc:
+                    raise WhatsAppError(f"Could not reach the WhatsApp gateway: {exc.__class__.__name__}")
+                finally:
+                    throttle.done()
+        else:
             try:
                 resp = await client.request(method, url, json=payload, headers=headers)
             except httpx.HTTPError as exc:
-                raise WhatsAppError(
-                    f"Could not reach the WhatsApp gateway: {exc.__class__.__name__}"
-                )
-            finally:
-                throttle.done()
+                raise WhatsAppError(f"Could not reach the WhatsApp gateway: {exc.__class__.__name__}")
     finally:
         if owns_client:
             await client.aclose()
     if resp.status_code >= 400:
         detail = describe_gateway_error(resp)
         log.warning("Evolution API HTTP %s on %s: %s", resp.status_code, path, resp.text[:500])
-        raise WhatsAppError(f"WhatsApp gateway rejected the request (HTTP {resp.status_code}): {detail}")
+        raise WhatsAppError(f"WhatsApp gateway rejected the request (HTTP {resp.status_code}): {detail}",
+                            status_code=resp.status_code)
     return resp
 
 
@@ -590,6 +611,7 @@ async def send_whatsapp_pdf(
     caption: str,
     file_name: str = "ticket.pdf",
     client: httpx.AsyncClient | None = None,
+    instance: str | None = None,
 ) -> SentRef | None:
     """Send a PDF document through Evolution API's /message/sendMedia/{instance}.
 
@@ -607,8 +629,9 @@ async def send_whatsapp_pdf(
         "caption": caption,
         "media": encoded,
         "fileName": file_name,
+        "delay": random.randint(*config.WHATSAPP_TYPING_MS),   # Evolution shows "typing..." this long first
     }
-    resp = await _gateway_call("POST", "/message/sendMedia", payload, client)
+    resp = await _gateway_call("POST", "/message/sendMedia", payload, client, instance)
     try:
         key = resp.json().get("key") or {}
         if key.get("id") and key.get("remoteJid"):
@@ -620,7 +643,52 @@ async def send_whatsapp_pdf(
 
 
 async def delete_whatsapp_message(remote_jid: str, message_id: str,
-                                  client: httpx.AsyncClient | None = None) -> None:
+                                  client: httpx.AsyncClient | None = None, instance: str | None = None) -> None:
     """Delete a message we sent "for everyone" (Evolution: /chat/deleteMessageForEveryone)."""
     await _gateway_call("DELETE", "/chat/deleteMessageForEveryone",
-                        {"id": message_id, "remoteJid": remote_jid, "fromMe": True}, client)
+                        {"id": message_id, "remoteJid": remote_jid, "fromMe": True}, client, instance)
+
+
+async def send_whatsapp_text(phone: str, text: str, instance: str | None = None,
+                             client: httpx.AsyncClient | None = None) -> None:
+    """Plain text message (used by the line health test)."""
+    payload = {"number": normalize_phone(phone), "text": text,
+               "delay": random.randint(*config.WHATSAPP_TYPING_MS)}
+    await _gateway_call("POST", "/message/sendText", payload, client, instance)
+
+
+# ---- instance management (talks to Evolution only, never to WhatsApp contacts: not throttled)
+
+async def evolution_create_instance(name: str, client: httpx.AsyncClient | None = None) -> None:
+    await _gateway_call("POST", "/instance/create",
+                        {"instanceName": name, "integration": "WHATSAPP-BAILEYS", "qrcode": True},
+                        client, instance="", throttled=False)
+
+
+async def evolution_state(name: str, client: httpx.AsyncClient | None = None) -> str:
+    """'open' (connected), 'connecting', 'close' ... ; 'missing' if Evolution does not know the instance."""
+    try:
+        resp = await _gateway_call("GET", "/instance/connectionState", None, client, name, throttled=False)
+    except WhatsAppError as exc:
+        if exc.status_code == 404:
+            return "missing"
+        raise
+    body = resp.json()
+    return str((body.get("instance") or body).get("state", "unknown"))
+
+
+async def evolution_connect(name: str, number: str | None = None,
+                            client: httpx.AsyncClient | None = None) -> dict:
+    """QR code (data URI) and/or pairing code for linking the phone."""
+    url_instance = f"{name}?number={normalize_phone(number)}" if number else name
+    resp = await _gateway_call("GET", "/instance/connect", None, client, url_instance, throttled=False)
+    body = resp.json()
+    return {"qr": body.get("base64") or "", "pairing_code": body.get("pairingCode") or "", "raw_count": body.get("count")}
+
+
+async def evolution_delete_instance(name: str, client: httpx.AsyncClient | None = None) -> None:
+    try:
+        await _gateway_call("DELETE", "/instance/delete", None, client, name, throttled=False)
+    except WhatsAppError as exc:
+        if exc.status_code != 404:
+            raise
