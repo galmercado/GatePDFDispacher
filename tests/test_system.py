@@ -1049,3 +1049,38 @@ def test_migration_adds_delete_at(tmp_path):
     migrate(eng)
     with eng.begin() as c:
         c.execute(text("SELECT delete_at FROM sent_messages"))
+
+
+def test_json_keys_use_the_same_aliases_as_spreadsheet_columns():
+    rows = [
+        {"name": "A", "phone": "0501234567", "adult": 3, "youth": 1},
+        {"Name": "B", "Phone": "0501234568", "Adults": "4", "category": "plus"},
+        {"full_name": "C", "mobile": "0501234569", "Adult Count": 2, "Youth-Count": 2, "מבוגר": 2},
+        {"name": "D", "phone": "0501234560", "tickets": 5},                   # legacy total -> adults
+        {"name": "E", "phone": "0501234561", "מבוגר": 1, "נוער": 2, "סוג": "מצטרף"},
+        {"name": "F", "phone": "0501234562", "adult_count": 0, "youth_count": 2},   # zero adults is valid
+    ]
+    result = services.parse_guest_list("g.json", json.dumps(rows).encode())
+    got = [(v.name, v.adult_count, v.youth_count, v.ticket_count, v.category) for v in result.valid]
+    assert got == [("A", 3, 1, 4, "פתוח"), ("B", 4, 0, 4, "פלוס"), ("C", 2, 2, 4, "פתוח"),
+                   ("D", 5, 0, 5, "פתוח"), ("E", 1, 2, 3, "מצטרף"), ("F", 0, 2, 2, "פתוח")]
+    assert result.issues == [] and result.ignored == []
+
+
+def test_unrecognised_fields_are_reported_not_silently_dropped(admin, event_id):
+    rows = [{"name": "A", "phone": "0501234567", "grown ups": 3, "kids": 1}]
+    assert services.parse_guest_list("g.json", json.dumps(rows).encode()).ignored == ["grown ups", "kids"]
+    r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(rows).encode())})
+    assert r.status_code == 200 and "not recognised and were ignored: grown ups, kids" in r.text
+    buf = io.BytesIO()
+    pd.DataFrame({"name": ["X"], "phone": ["0507654321"], "Adults": [3], "Kids": [1]}).to_excel(buf, index=False)
+    res = services.parse_guest_list("l.xlsx", buf.getvalue())
+    assert res.valid[0].adult_count == 3 and res.ignored == ["Kids"]
+
+
+def test_json_alias_counts_reach_the_database(admin, event_id):
+    rows = [{"name": "Big Group", "phone": "0501234567", "adult": 3, "youth": 2}]
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(rows).encode())})
+    with SessionLocal() as db:
+        g = db.query(Attendee).filter_by(event_id=event_id, name="Big Group").one()
+        assert (g.adult_count, g.youth_count, g.ticket_count) == (3, 2, 5)

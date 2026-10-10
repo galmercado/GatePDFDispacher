@@ -39,6 +39,32 @@ COLUMN_ALIASES = {
 }
 
 
+def _norm_key(key) -> str:
+    return re.sub(r"[\s_\-]+", " ", str(key).strip().lower())
+
+
+# "Adult Count", "adult_count", "ADULTS", "מבוגר" ... -> adult_count (works for .xlsx headers and JSON keys)
+_ALIAS_LOOKUP = {_norm_key(alias): field for field, aliases in COLUMN_ALIASES.items()
+                 for alias in aliases | {field}}
+
+
+def canonical_field(key) -> str | None:
+    return _ALIAS_LOOKUP.get(_norm_key(key))
+
+
+def canonicalize_row(row: dict) -> tuple[dict, list[str]]:
+    """Map a row's keys to model fields. Returns (row, names of columns/keys that were not recognised)."""
+    out: dict = {}
+    unknown: list[str] = []
+    for key, value in row.items():
+        field = canonical_field(key)
+        if field is None:
+            unknown.append(str(key))
+        else:
+            out[field] = value
+    return out, unknown
+
+
 def normalize_phone(raw) -> str:
     """Return digits-only international format, adding DEFAULT_COUNTRY_CODE to local numbers.
 
@@ -190,18 +216,11 @@ def _rows_from_xlsx(content: bytes) -> list[dict]:
     except Exception as exc:
         raise ImportValidationError([f"Could not read the spreadsheet: {exc}"])
     df = df.fillna("")
-    rename: dict[str, str] = {}
-    for col in df.columns:
-        key = str(col).strip().lower()
-        for field, aliases in COLUMN_ALIASES.items():
-            if key in aliases:
-                rename[col] = field
-    df = df.rename(columns=rename)
-    missing = [f for f in ("name", "phone") if f not in df.columns]
+    fields = {canonical_field(c) for c in df.columns}
+    missing = [f for f in ("name", "phone") if f not in fields]
     if missing:
         raise ImportValidationError([f"Missing required column(s): {', '.join(missing)}"])
-    keep = [c for c in df.columns if c in COLUMN_ALIASES]
-    return df[keep].to_dict(orient="records")
+    return df.to_dict(orient="records")
 
 
 def _rows_from_json(content: bytes) -> list[dict]:
@@ -228,6 +247,7 @@ class RowIssue(NamedTuple):
 class ParseResult(NamedTuple):
     valid: list[AttendeeIn]
     issues: list[RowIssue]
+    ignored: list[str] = []   # column / key names that were not recognised (and therefore not imported)
 
 
 def _row_as_form(row: dict) -> dict:
@@ -258,9 +278,12 @@ def parse_guest_list(filename: str, content: bytes) -> ParseResult:
 
     valid: list[AttendeeIn] = []
     issues: list[RowIssue] = []
+    ignored: dict[str, None] = {}
     seen: set[tuple[str, str]] = set()
-    for i, row in enumerate(rows):
+    for i, raw_row in enumerate(rows):
         label = f"Row {i + offset}"
+        row, unknown = canonicalize_row(raw_row)
+        ignored.update(dict.fromkeys(unknown))
         shown = _row_as_form(row)
         cleaned = {k: v for k, v in row.items() if v is not None and str(v).strip() != ""}
         try:
@@ -274,7 +297,7 @@ def parse_guest_list(filename: str, content: bytes) -> ParseResult:
             continue
         seen.add(key)
         valid.append(item)
-    return ParseResult(valid, issues)
+    return ParseResult(valid, issues, list(ignored))
 
 
 def import_attendees(db: Session, event_id: int, items: list[AttendeeIn]) -> tuple[int, int]:

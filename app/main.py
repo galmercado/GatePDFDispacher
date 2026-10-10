@@ -484,6 +484,9 @@ async def import_guest_list(
         msgs.append(f"Assigned {result['assigned']} spare ticket page(s) automatically.")
     warnings = ([f"{len(parsed.issues)} row(s) have problems and were NOT imported. Fix them or skip them below."]
                 if parsed.issues else [])
+    if parsed.ignored:
+        warnings.append("These columns/keys were not recognised and were ignored: " + ", ".join(parsed.ignored)
+                        + ". Recognised: name, phone, category, adult/מבוגר, youth/נוער, email, age, notes.")
     return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, warnings=warnings))
 
 
