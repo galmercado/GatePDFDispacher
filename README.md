@@ -106,6 +106,17 @@ the event can no longer be deleted afterwards. Evolution API does not expose Wha
 one-to-one chats, which is why the app does the deleting itself. Guests see "This message was deleted". Only messages sent after
 this feature was deployed can be deleted.
 
+## Import from the registration system (gate11.co.il)
+
+On an event's **Manage** page: enter the registration system's **event ID** (`gameId`, e.g. 377) and press **Fetch & import**. The server downloads
+`https://gate11.co.il/admin/page.php?id=ticketReservations&gameId=<ID>`, finds the reservations table (Hebrew or English headers: שם / שם פרטי + שם משפחה,
+טלפון / נייד, דוא"ל, סוג, מבוגרים, נוער, כמות, גיל, הערות ...) and imports it exactly like a guest-list file: new guests are added, changed ones (ticket counts, type ...)
+are updated, bad rows go to the fix-or-skip panel, and unrecognised columns are listed. Run it again whenever the registration changes.
+
+The registration site uses Google sign-in, which a server cannot perform for you, so the fetch uses **your browser session**: sign in there, open the page, copy the
+`Cookie` request header from the browser's developer tools (F12 -> Network) and paste it under *Session cookie* (stored on your server, never displayed again;
+repeat when it expires). No cookie? Use *Import a saved page*: save the page from your browser (HTML) and upload it, or paste the table HTML.
+
 ## WhatsApp lines (several numbers, fail-over)
 
 Admins get a **Lines** page (SIM-card icon in the header). Each line is one WhatsApp number = one Evolution instance:

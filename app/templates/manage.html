@@ -61,6 +61,50 @@
   </div>
 </section>
 {% endif %}
+
+<section class="mb-4 rounded-2xl border border-slate-800 bg-slate-900 p-5" id="registration-import">
+  <h2 class="mb-1 flex items-center gap-2 font-semibold text-white"><i class="ph ph-cloud-arrow-down text-brand-400"></i> Import from the registration system</h2>
+  <p class="mb-3 text-sm text-slate-400">Reads the reservations table of this game from <b>{{ registration_host }}</b> and adds the guests here. Run it again any time: new guests are added and changed ones (e.g. ticket counts) are updated.</p>
+  <form method="post" action="/events/{{ event.id }}/registration/id" class="mb-3 flex gap-2">
+    <input name="external_id" value="{{ event.external_id or '' }}" inputmode="numeric" placeholder="Registration event ID (gameId), e.g. 377"
+           class="w-full min-w-0 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white outline-none focus:border-brand-400">
+    <button class="shrink-0 rounded-xl bg-slate-800 px-4 text-sm font-semibold text-white hover:bg-slate-700">Save ID</button>
+  </form>
+
+  {% if event.external_id %}
+  <form method="post" action="/events/{{ event.id }}/registration/fetch" class="mb-3">
+    <button class="flex w-full items-center justify-center gap-2 rounded-xl bg-brand-500 py-3 font-semibold text-white hover:bg-brand-600 {{ 'opacity-60' if not has_cookie }}">
+      <i class="ph-bold ph-cloud-arrow-down"></i> Fetch &amp; import game {{ event.external_id }}</button>
+    {% if not has_cookie %}<p class="mt-1 text-xs text-amber-300">Paste your session cookie below first (or use the saved page option).</p>{% endif %}
+  </form>
+  {% endif %}
+
+  <details class="mb-2 rounded-xl border border-slate-800 bg-slate-950/60" {{ 'open' if not has_cookie and event.external_id }}>
+    <summary class="cursor-pointer list-none p-3 text-sm font-medium text-slate-200"><i class="ph ph-key text-brand-400"></i> Session cookie {% if has_cookie %}<span class="ml-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-emerald-300">saved</span>{% else %}<span class="ml-1 rounded bg-slate-700 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-300">not set</span>{% endif %}</summary>
+    <div class="border-t border-slate-800 p-3 text-sm text-slate-400">
+      <p class="mb-2">The server cannot sign in with Google for you, so it uses <b>your browser's signed-in session</b>:
+        sign in to the registration site with the same Google account, open the reservations page, press <kbd>F12</kbd> → <i>Network</i> → reload →
+        click the first request → <i>Request Headers</i> → copy the value of <code>Cookie</code> and paste it here. When it expires, repeat.</p>
+      <form method="post" action="/registration/cookie" class="grid gap-2">
+        <input type="hidden" name="event_id" value="{{ event.id }}">
+        <textarea name="cookie" rows="3" autocomplete="off" spellcheck="false" placeholder="PHPSESSID=…; other=…" class="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-white outline-none focus:border-brand-400"></textarea>
+        <div class="flex gap-2"><button class="rounded-xl bg-slate-800 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700">Save cookie</button>
+          {% if has_cookie %}<button name="clear" value="1" formnovalidate class="rounded-xl border border-rose-500/40 px-4 py-2 text-sm text-rose-300 hover:bg-rose-500/10">Remove saved cookie</button>{% endif %}</div>
+      </form>
+      <p class="mt-2 text-xs text-slate-500">The cookie is stored on your server, never shown again, and gives access to your registration account - use it only on your own deployment.</p>
+    </div>
+  </details>
+
+  <details class="rounded-xl border border-slate-800 bg-slate-950/60">
+    <summary class="cursor-pointer list-none p-3 text-sm font-medium text-slate-200"><i class="ph ph-file-html text-brand-400"></i> Or import a saved page (no cookie needed)</summary>
+    <form method="post" action="/events/{{ event.id }}/registration/upload" enctype="multipart/form-data" class="grid gap-2 border-t border-slate-800 p-3">
+      <p class="text-sm text-slate-400">On the reservations page choose <i>Save page as…</i> (HTML) and upload that file, or paste the table's HTML.</p>
+      <input type="file" name="file" accept=".html,.htm,text/html" class="rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-2.5 file:text-slate-200">
+      <textarea name="html" rows="3" placeholder="…or paste HTML here" class="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-white"></textarea>
+      <button class="rounded-xl bg-slate-800 py-2.5 text-sm font-semibold text-white hover:bg-slate-700"><i class="ph-bold ph-upload-simple"></i> Import page</button>
+    </form>
+  </details>
+</section>
 <section class="mb-4 rounded-2xl border border-slate-800 bg-slate-900 p-5">
   <h2 class="mb-1 flex items-center gap-2 font-semibold text-white"><i class="ph ph-users-three text-brand-400"></i> 1. Import guest list</h2>
   <p class="mb-3 text-sm text-slate-400">.xlsx or .json. Columns: <code class="text-slate-300">name, phone</code> (required),

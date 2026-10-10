@@ -3,6 +3,7 @@ import asyncio
 import json
 import shutil
 import random
+import re
 import uuid
 import secrets
 from urllib.parse import urlsplit
@@ -34,8 +35,8 @@ from .messages import ticket_caption
 from .services import (
     AttendeeIn, ImportValidationError, describe_validation_error, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
     import_attendees,
-    evolution_connect, evolution_create_instance, evolution_delete_instance, evolution_state,
-    event_ticket_dir, normalize_phone, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, ticket_status,
+    RegistrationError, evolution_connect, evolution_create_instance, evolution_delete_instance, evolution_state,
+    event_ticket_dir, fetch_registration_page, normalize_phone, parse_registration_html, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, ticket_status,
 )
 
 log = logging.getLogger("gate")
@@ -495,7 +496,8 @@ def manage_ctx(db: Session, user: User, event: Event, **extra) -> dict:
     attendees = (db.query(Attendee).options(selectinload(Attendee.tickets))
                  .filter(Attendee.event_id == event.id).order_by(func.lower(Attendee.name), Attendee.id).all())
     return {"user": user, "event": event, "stats": compute_stats(db, event.id),
-            "issues": load_issues(db, event.id), "max_pdf_mb": config.MAX_PDF_BYTES // (1024 * 1024),
+            "issues": load_issues(db, event.id), "has_cookie": bool(registration_cookie(db)),
+            "registration_host": config.REGISTRATION_BASE_URL.removeprefix("https://"), "max_pdf_mb": config.MAX_PDF_BYTES // (1024 * 1024),
             "max_list_mb": config.MAX_LIST_BYTES // (1024 * 1024), "ticket_files": tickets, "spare_pages": status["spare"], "warnings": warnings, "attendees": attendees, "groups": group_by_category(attendees),
             "categories": data.CATEGORIES, "messages": [], "errors": [], **extra}
 
@@ -528,13 +530,19 @@ async def import_guest_list(
     except ImportValidationError as exc:
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=exc.errors[:50]), status=422)
+    return finish_import(request, db, user, event, parsed)
+
+
+def finish_import(request: Request, db: Session, user: User, event: Event, parsed, source: str = "") -> HTMLResponse:
+    """Save the valid rows (adding new guests, updating existing ones), park the bad rows for fix-or-skip,
+    hand out spare ticket PDFs, and show the result."""
     outcome = import_attendees(db, event.id, parsed.valid)
     for issue in parsed.issues:      # bad rows wait for the admin: fix them or skip them
         db.add(ImportIssue(event_id=event.id, label=issue.label, data=json.dumps(issue.row, ensure_ascii=False),
                            errors=json.dumps(issue.errors, ensure_ascii=False)))
     db.commit()
     result = rebalance_tickets(db, event.id)
-    msgs = [f"Imported {outcome.added} guest(s)."]
+    msgs = [f"{source}Imported {outcome.added} guest(s)."]
     if outcome.updated:
         shown = "; ".join(outcome.changes[:12]) + (f"; … and {len(outcome.changes) - 12} more" if len(outcome.changes) > 12 else "")
         msgs.append(f"Updated {outcome.updated} existing guest(s): {shown}")
@@ -549,6 +557,71 @@ async def import_guest_list(
         warnings.append("These columns/keys were not recognised and were ignored: " + ", ".join(parsed.ignored)
                         + ". Recognised: name, phone, category, adult/מבוגר, youth/נוער, email, age, notes.")
     return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, warnings=warnings))
+
+
+# ---- import from the registration system (gate11.co.il admin page)
+
+COOKIE_KEY = "registration_cookie"
+
+
+def registration_cookie(db: Session) -> str:
+    return linesmod.get_setting(db, COOKIE_KEY, config.REGISTRATION_COOKIE)
+
+
+@app.post("/events/{event_id}/registration/id", response_class=HTMLResponse)
+def save_registration_id(event_id: int, request: Request, external_id: str = Form(""),
+                         user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    event = get_event_or_404(db, event_id)
+    external_id = external_id.strip()
+    if external_id and not re.fullmatch(r"\d{1,9}", external_id):
+        return render(request, "manage.html", manage_ctx(db, user, event, errors=["The registration event ID must be a number."]), status=422)
+    event.external_id = external_id or None
+    db.commit()
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=[
+        f"Registration event ID saved ({external_id})." if external_id else "Registration event ID cleared."]))
+
+
+@app.post("/registration/cookie", response_class=HTMLResponse)
+def save_registration_cookie(request: Request, event_id: int = Form(...), cookie: str = Form(""), clear: str = Form(""),
+                             user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    event = get_event_or_404(db, event_id)
+    cookie = " ".join(cookie.split()).removeprefix("Cookie:").strip()
+    if clear:
+        linesmod.set_setting(db, COOKIE_KEY, "")
+        return render(request, "manage.html", manage_ctx(db, user, event, messages=["Session cookie removed."]))
+    if not cookie or "=" not in cookie or len(cookie) > 4000:
+        return render(request, "manage.html", manage_ctx(db, user, event, errors=[
+            "Paste the value of the Cookie header (looks like name=value; other=value)."]), status=422)
+    linesmod.set_setting(db, COOKIE_KEY, cookie)
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=["Session cookie saved."]))
+
+
+@app.post("/events/{event_id}/registration/fetch", response_class=HTMLResponse)
+async def fetch_registration(event_id: int, request: Request, user: User = Depends(require_admin),
+                             db: Session = Depends(get_db)):
+    event = get_event_or_404(db, event_id)
+    try:
+        page = await fetch_registration_page(event.external_id or "", registration_cookie(db))
+        parsed = parse_registration_html(page)
+    except (RegistrationError, ImportValidationError) as exc:
+        errors = exc.errors if isinstance(exc, ImportValidationError) else [str(exc)]
+        return render(request, "manage.html", manage_ctx(db, user, event, errors=errors), status=422)
+    return finish_import(request, db, user, event, parsed, source=f"Registration #{event.external_id}: ")
+
+
+@app.post("/events/{event_id}/registration/upload", response_class=HTMLResponse)
+async def upload_registration_page(event_id: int, request: Request, file: UploadFile = File(None), html: str = Form(""),
+                                   user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Fallback without any credentials: a page saved from the browser ("Save as...") or pasted HTML."""
+    event = get_event_or_404(db, event_id)
+    content = (await file.read(config.MAX_REGISTRATION_BYTES + 1)) if file is not None and file.filename else html.encode()
+    try:
+        if len(content) > config.MAX_REGISTRATION_BYTES:
+            raise RegistrationError("The page is too large")
+        parsed = parse_registration_html(content)
+    except RegistrationError as exc:
+        return render(request, "manage.html", manage_ctx(db, user, event, errors=[str(exc)]), status=422)
+    return finish_import(request, db, user, event, parsed, source="Saved page: ")
 
 
 def get_issue_or_404(db: Session, issue_id: int) -> ImportIssue:

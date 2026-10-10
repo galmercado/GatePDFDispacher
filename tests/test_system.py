@@ -1579,3 +1579,142 @@ def test_lines_manager_is_admin_only_and_manages_lines(admin, doorman, lines3, m
     assert "Test number saved" in admin.post("/lines/settings", data={"test_number": "052-1234567"}).text
     assert admin.post("/lines/settings", data={"test_number": "12"}).status_code == 422
     assert "Removed Spare SIM" in admin.post(f"/lines/{sid}/delete").text and f"deleted:event-door-4" in created
+
+
+# ----------------------------------------------------------------- import from the registration system
+
+REG_HTML = """<!doctype html><html dir="rtl"><head><meta charset="utf-8"><title>הזמנות כרטיסים</title></head><body>
+<table class="nav"><tr><td><a href="/">בית</a></td><td><a href="/admin">ניהול</a></td></tr></table>
+<h2>הזמנות למשחק 377</h2>
+<table id="res" class="table">
+  <thead><tr><th>#</th><th>שם פרטי</th><th>שם משפחה</th><th>טלפון נייד</th><th>דוא"ל</th><th>סוג</th><th>מבוגרים</th><th>נוער</th><th>גיל</th><th>תשלום</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><b>דנה</b></td><td>לוי</td><td>052-1111111</td><td><a href="mailto:d@x.co">d@x.co</a></td><td>חבר ארגון</td><td>2</td><td>1</td><td>34.5</td><td>שולם</td></tr>
+    <tr><td>2</td><td>נועה</td><td>בר</td><td>0522222222</td><td></td><td>פלוס</td><td>1</td><td></td><td></td><td>שולם</td></tr>
+    <tr><td>3</td><td>בלי</td><td>טלפון</td><td>12</td><td></td><td>פתוח</td><td>1</td><td>0</td><td></td><td>ממתין</td></tr>
+    <tr><th>#</th><th>שם פרטי</th><th>שם משפחה</th><th>טלפון נייד</th><th>דוא"ל</th><th>סוג</th><th>מבוגרים</th><th>נוער</th><th>גיל</th><th>תשלום</th></tr>
+    <tr><td>4</td><td>יוסי</td><td>כהן</td><td>+972 53-3333333</td><td></td><td>מצטרף</td><td>0</td><td>3</td><td></td><td>שולם</td></tr>
+    <tr><td colspan="10">סה"כ 4 הזמנות</td></tr>
+  </tbody>
+</table></body></html>"""
+
+
+def test_registration_table_is_found_and_mapped():
+    from app.services import extract_table, parse_registration_html
+    rows = extract_table(REG_HTML.encode())
+    assert len(rows) == 4 and rows[0]["שם פרטי"] == "דנה" and "סה\"כ" not in str(rows)     # nav table, footer, repeated header ignored
+    res = parse_registration_html(REG_HTML.encode())
+    got = {v.name: (v.phone, v.category, v.adult_count, v.youth_count, v.age, v.email) for v in res.valid}
+    assert got == {"דנה לוי": ("972521111111", "חבר ארגון", 2, 1, 34.5, "d@x.co"),
+                   "נועה בר": ("972522222222", "פלוס", 1, 0, None, None),
+                   "יוסי כהן": ("972533333333", "מצטרף", 0, 3, None, None)}
+    assert [i.label for i in res.issues] == ["Row 3"] and "phone" in res.issues[0].errors[0]
+    assert res.ignored == ["#", "תשלום"]
+
+
+def test_registration_page_without_a_usable_table():
+    from app.services import RegistrationError, extract_table
+    for html in ("", "<html><body><p>hello</p></body></html>",
+                 "<table><tr><td>a</td><td>b</td></tr><tr><td>1</td><td>2</td></tr></table>"):
+        with pytest.raises(RegistrationError):
+            extract_table(html)
+
+
+def test_fetching_the_registration_page(monkeypatch):
+    import asyncio
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"], seen["cookie"] = str(request.url), request.headers.get("cookie")
+        kind = seen.get("kind")
+        if kind == "redirect":
+            return httpx.Response(302, headers={"location": "https://accounts.google.com/o/oauth2/auth"})
+        if kind == "login":
+            return httpx.Response(200, text='<html><form action="https://accounts.google.com/x"><input type="password"></form></html>')
+        return httpx.Response(200, content=REG_HTML.encode())
+
+    async def go(game_id, cookie="PHPSESSID=abc; x=1"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await services.fetch_registration_page(game_id, cookie, client=c)
+
+    assert asyncio.run(go("377")).startswith(b"<!doctype")
+    assert seen["url"] == "https://gate11.co.il/admin/page.php?id=ticketReservations&gameId=377"
+    assert seen["cookie"] == "PHPSESSID=abc; x=1"
+    for kind in ("redirect", "login"):
+        seen["kind"] = kind
+        with pytest.raises(services.RegistrationError, match="expired"):
+            asyncio.run(go("377"))
+    for bad in ("377&x=1", "../etc", "abc", "", "37 7"):                      # only digits ever reach the URL
+        with pytest.raises(services.RegistrationError):
+            asyncio.run(go(bad))
+    with pytest.raises(services.RegistrationError, match="cookie"):
+        asyncio.run(go("377", cookie=" "))
+
+
+def test_registration_import_endpoints(admin, doorman, event_id, monkeypatch):
+    page = admin.get(f"/events/{event_id}/manage").text
+    assert "Import from the registration system" in page and "Fetch &amp; import" not in page      # no ID yet
+    assert doorman.post(f"/events/{event_id}/registration/id", data={"external_id": "377"}).status_code == 403
+    assert admin.post(f"/events/{event_id}/registration/id", data={"external_id": "37x"}).status_code == 422
+    r = admin.post(f"/events/{event_id}/registration/id", data={"external_id": "377"})
+    assert "Registration event ID saved (377)" in r.text and "Fetch &amp; import game 377" in r.text
+
+    # no cookie yet -> clear message, nothing imported
+    monkeypatch.setattr(config, "REGISTRATION_COOKIE", "")
+    r = admin.post(f"/events/{event_id}/registration/fetch")
+    assert r.status_code == 422 and "No session cookie saved" in r.text
+    # cookie: validated, stored, never echoed back
+    assert admin.post("/registration/cookie", data={"event_id": event_id, "cookie": "nonsense"}).status_code == 422
+    secret = "PHPSESSID=SUPERSECRET123; lang=he"
+    r = admin.post("/registration/cookie", data={"event_id": event_id, "cookie": "Cookie: " + secret})
+    assert "Session cookie saved" in r.text and "SUPERSECRET123" not in r.text and "saved" in r.text
+    assert "SUPERSECRET123" not in admin.get(f"/events/{event_id}/manage").text
+    assert doorman.post("/registration/cookie", data={"event_id": event_id, "cookie": secret}).status_code == 403
+
+    calls = []
+
+    async def fake_fetch(game_id, cookie, client=None):
+        calls.append((game_id, cookie))
+        return REG_HTML.encode()
+
+    monkeypatch.setattr("app.main.fetch_registration_page", fake_fetch)
+    r = admin.post(f"/events/{event_id}/registration/fetch")
+    assert calls == [("377", secret)] and "Registration #377: Imported 3 guest(s)." in r.text
+    assert "1 row(s) have problems" in r.text and "not recognised and were ignored: #, תשלום" in r.text
+    with SessionLocal() as db:
+        dana = db.query(Attendee).filter_by(event_id=event_id, name="דנה לוי").one()
+        assert (dana.adult_count, dana.youth_count, dana.age, dana.category) == (2, 1, 34.5, "חבר ארגון")
+
+    # later the registration changed Dana to 4 adults: re-fetch updates her, adds nobody
+    changed = REG_HTML.replace("<td>2</td><td>1</td><td>34.5</td>", "<td>4</td><td>1</td><td>34.5</td>")
+
+    async def fake_fetch2(game_id, cookie, client=None):
+        return changed.encode()
+
+    monkeypatch.setattr("app.main.fetch_registration_page", fake_fetch2)
+    r = admin.post(f"/events/{event_id}/registration/fetch")
+    assert "Imported 0 guest(s)" in r.text and "Updated 1 existing guest(s): דנה לוי: tickets adult 2→4" in r.text
+    # expired session is reported, not crashed
+    async def expired(game_id, cookie, client=None):
+        raise services.RegistrationError("The registration site asked to sign in again - the saved session cookie has expired.")
+
+    monkeypatch.setattr("app.main.fetch_registration_page", expired)
+    r = admin.post(f"/events/{event_id}/registration/fetch")
+    assert r.status_code == 422 and "cookie has expired" in r.text
+    assert "Session cookie removed" in admin.post("/registration/cookie", data={"event_id": event_id, "clear": "1"}).text
+
+
+def test_registration_saved_page_upload(admin, doorman, event_id):
+    r = admin.post(f"/events/{event_id}/registration/upload", files={"file": ("page.html", REG_HTML.encode("utf-8"), "text/html")})
+    assert r.status_code == 200 and "Saved page: Imported 3 guest(s)." in r.text
+    r = admin.post(f"/events/{event_id}/registration/upload", data={"html": "<p>nothing here</p>"})
+    assert r.status_code == 422 and "No table" in r.text
+    assert doorman.post(f"/events/{event_id}/registration/upload", data={"html": REG_HTML}).status_code == 403
+    assert admin.post(f"/events/{event_id}/registration/upload").status_code == 422        # nothing provided
+
+
+def test_hebrew_and_split_names_also_work_in_json_imports():
+    rows = [{"שם פרטי": "דנה", "שם משפחה": "לוי", "נייד": "0501234567", "מבוגרים": 3, "נוער": 1, "קטגוריה": "פלוס"}]
+    res = services.parse_guest_list("g.json", json.dumps(rows, ensure_ascii=False).encode())
+    v = res.valid[0]
+    assert (v.name, v.adult_count, v.youth_count, v.category) == ("דנה לוי", 3, 1, "פלוס") and res.ignored == []

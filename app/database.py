@@ -64,6 +64,9 @@ def migrate(bind: Engine) -> None:
     if "events" in names and "lines_tested_at" not in {c["name"] for c in insp.get_columns("events")}:
         with bind.begin() as conn:
             conn.execute(text("ALTER TABLE events ADD COLUMN lines_tested_at DATETIME"))
+    if "events" in names and "external_id" not in {c["name"] for c in insp.get_columns("events")}:
+        with bind.begin() as conn:
+            conn.execute(text("ALTER TABLE events ADD COLUMN external_id VARCHAR(32)"))
     if "sent_messages" in insp.get_table_names():
         if "delete_at" not in {c["name"] for c in insp.get_columns("sent_messages")}:
             with bind.begin() as conn:

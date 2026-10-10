@@ -71,3 +71,9 @@ WHATSAPP_DELETE_GIVE_UP_HOURS = 47.0
 
 MAX_PDF_BYTES = 200 * 1024 * 1024
 MAX_LIST_BYTES = 5 * 1024 * 1024
+
+# External registration system whose admin page lists the reservations of a game (scraped on demand).
+REGISTRATION_BASE_URL = os.getenv("REGISTRATION_BASE_URL", "https://gate11.co.il").rstrip("/")
+REGISTRATION_PATH = "/admin/page.php?id=ticketReservations&gameId={game_id}"
+REGISTRATION_COOKIE = os.getenv("REGISTRATION_COOKIE", "")      # optional default; normally pasted on the Manage page
+MAX_REGISTRATION_BYTES = 5 * 1024 * 1024

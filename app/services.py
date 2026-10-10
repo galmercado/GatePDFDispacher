@@ -26,21 +26,31 @@ log = logging.getLogger("gate.whatsapp")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 COLUMN_ALIASES = {
-    "name": {"name", "full name", "fullname", "guest", "guest name", "nombre"},
-    "phone": {"phone", "phone number", "mobile", "whatsapp", "cell", "telefono", "teléfono"},
-    "email": {"email", "e-mail", "email address", "correo"},
-    "age": {"age", "edad"},
-    "category": {"category", "attendee type", "type", "group", "סוג", "קטגוריה", "סוג משתתף"},
-    "adult_count": {"adult_count", "adult", "adults", "adult tickets", "מבוגר", "מבוגרים"},
-    "youth_count": {"youth_count", "youth", "youths", "youth tickets", "נוער"},
+    "name": {"name", "full name", "fullname", "guest", "guest name", "nombre", "שם", "שם מלא", "שם המזמין", "שם הלקוח",
+             "שם משתתף", "שם האורח", "מזמין"},
+    "first_name": {"first name", "firstname", "given name", "שם פרטי"},
+    "last_name": {"last name", "lastname", "surname", "family name", "שם משפחה", "משפחה"},
+    "phone": {"phone", "phone number", "mobile", "whatsapp", "cell", "telefono", "teléfono", "טלפון", "טלפון נייד", "נייד",
+              "פלאפון", "סלולרי", "מספר טלפון", "מס טלפון", "מספר נייד", "טל"},
+    "email": {"email", "e-mail", "email address", "correo", "אימייל", "אי מייל", "מייל", "דואל", "דוא ל", "דואר אלקטרוני",
+              "כתובת מייל", "כתובת אימייל"},
+    "age": {"age", "edad", "גיל"},
+    "category": {"category", "attendee type", "type", "group", "סוג", "קטגוריה", "סוג משתתף", "סוג הזמנה", "סוג מנוי",
+                 "סוג כרטיס", "סטטוס חבר"},
+    "adult_count": {"adult_count", "adult", "adults", "adult tickets", "מבוגר", "מבוגרים", "כרטיסי מבוגר", "כמות מבוגרים",
+                    "מס מבוגרים", "מספר מבוגרים"},
+    "youth_count": {"youth_count", "youth", "youths", "youth tickets", "נוער", "כרטיסי נוער", "כמות נוער", "בני נוער",
+                    "מס נוער", "מספר נוער"},
     # legacy total: treated as adult tickets when no adult/youth columns are given
-    "ticket_count": {"ticket_count", "ticket count", "tickets", "qty", "quantity", "count", "כרטיסים"},
-    "notes": {"notes", "note", "comments", "notas"},
+    "ticket_count": {"ticket_count", "ticket count", "tickets", "qty", "quantity", "count", "כרטיסים", "כמות", "כמות כרטיסים",
+                     "מס כרטיסים", "מספר כרטיסים"},
+    "notes": {"notes", "note", "comments", "notas", "הערות", "הערה"},
 }
 
 
 def _norm_key(key) -> str:
-    return re.sub(r"[\s_\-]+", " ", str(key).strip().lower())
+    text = re.sub(r"[\"'״׳.:*()\[\]/]", " ", str(key).lower())      # punctuation, quotes, geresh/gershayim
+    return re.sub(r"[\s_\-]+", " ", text).strip()
 
 
 # "Adult Count", "adult_count", "ADULTS", "מבוגר" ... -> adult_count (works for .xlsx headers and JSON keys)
@@ -62,6 +72,9 @@ def canonicalize_row(row: dict) -> tuple[dict, list[str]]:
             unknown.append(str(key))
         else:
             out[field] = value
+    first, last = str(out.pop("first_name", "") or "").strip(), str(out.pop("last_name", "") or "").strip()
+    if not str(out.get("name", "") or "").strip() and (first or last):      # "שם פרטי" + "שם משפחה" -> name
+        out["name"] = f"{first} {last}".strip()
     return out, unknown
 
 
@@ -277,7 +290,11 @@ def parse_guest_list(filename: str, content: bytes) -> ParseResult:
         raise ImportValidationError(["Unsupported file type: upload a .xlsx or .json file"])
     if not rows:
         raise ImportValidationError(["The file contains no guests"])
+    return parse_rows(rows, offset)
 
+
+def parse_rows(rows: list[dict], offset: int = 1) -> ParseResult:
+    """Validate rows (dicts keyed by column name/alias). Bad rows come back as RowIssue to fix or skip."""
     valid: list[AttendeeIn] = []
     issues: list[RowIssue] = []
     ignored: dict[str, None] = {}
@@ -692,3 +709,93 @@ async def evolution_delete_instance(name: str, client: httpx.AsyncClient | None 
     except WhatsAppError as exc:
         if exc.status_code != 404:
             raise
+
+
+# --------------------------------------------------------------------------- registration system (HTML table)
+
+class RegistrationError(RuntimeError):
+    pass
+
+
+def _cell_text(el) -> str:
+    return " ".join(el.text_content().split())
+
+
+def extract_table(html: bytes | str) -> list[dict]:
+    """Find the reservations table in an HTML page and return its rows as dicts keyed by header text.
+
+    The best table is the one whose header row has the most recognisable column names (name, phone ...),
+    then the one with the most rows. Navigation/layout tables are ignored.
+    """
+    import lxml.html
+
+    if not html or not html.strip():
+        raise RegistrationError("The page is empty")
+    try:
+        doc = lxml.html.fromstring(html)
+    except (ValueError, lxml.etree.ParserError) as exc:
+        raise RegistrationError(f"Could not read the page: {exc}")
+    best, best_score, seen_headers = None, (-1, -1), []
+    for table in doc.xpath("//table"):
+        grid = [[_cell_text(c) for c in tr.xpath("./th|./td")] for tr in table.xpath(".//tr")]
+        grid = [r for r in grid if any(r)]
+        for hi, row in enumerate(grid[:6]):          # which of the first rows is the header?
+            known = sum(1 for c in row if canonical_field(c))
+            seen_headers.append(row)
+            score = (known, len(grid) - hi)
+            if known >= 2 and score > best_score:
+                best, best_score = (grid, hi), score
+    if best is None:
+        found = "; ".join(" | ".join(r)[:120] for r in seen_headers[:3]) or "no tables"
+        raise RegistrationError("No table with recognisable columns (name, phone, tickets ...) was found. "
+                                f"Headers seen: {found}")
+    grid, hi = best
+    headers = grid[hi]
+    rows = []
+    for row in grid[hi + 1:]:
+        if row == headers or len(row) < max(2, len(headers) // 2):      # repeated header (paging) / footer / spacer
+            continue
+        rows.append({h: (row[i] if i < len(row) else "") for i, h in enumerate(headers) if h})
+    if not rows:
+        raise RegistrationError("The table has no reservations")
+    return rows
+
+
+def parse_registration_html(html: bytes | str) -> ParseResult:
+    return parse_rows(extract_table(html), offset=1)
+
+
+async def fetch_registration_page(game_id: str, cookie: str, client: httpx.AsyncClient | None = None) -> bytes:
+    """Download the reservations page of one game, signed in with the browser session `cookie`.
+
+    Only the configured registration host is contacted, game_id must be digits, and redirects are never followed
+    (a redirect means the session is no longer valid).
+    """
+    game_id = (game_id or "").strip()
+    if not re.fullmatch(r"\d{1,9}", game_id):
+        raise RegistrationError("The registration event ID must be a number")
+    if not cookie.strip():
+        raise RegistrationError("No session cookie saved - paste it first (or upload the saved page instead)")
+    url = config.REGISTRATION_BASE_URL + config.REGISTRATION_PATH.format(game_id=game_id)
+    headers = {"Cookie": cookie.strip(), "Accept": "text/html", "User-Agent": "Mozilla/5.0 (compatible; GateImport/1.0)"}
+    owns = client is None
+    client = client or httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=8.0), follow_redirects=False)
+    try:
+        resp = await client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        raise RegistrationError(f"Could not reach the registration site: {exc.__class__.__name__}")
+    finally:
+        if owns:
+            await client.aclose()
+    if 300 <= resp.status_code < 400 or resp.status_code in (401, 403):
+        raise RegistrationError("The registration site asked to sign in again - the saved session cookie has expired. "
+                                "Sign in with Google in your browser and paste a fresh cookie.")
+    if resp.status_code >= 400:
+        raise RegistrationError(f"The registration site answered HTTP {resp.status_code}")
+    body = resp.content[: config.MAX_REGISTRATION_BYTES + 1]
+    if len(body) > config.MAX_REGISTRATION_BYTES:
+        raise RegistrationError("The page is too large")
+    lowered = body[:200000].lower()
+    if b"<table" not in lowered and (b"accounts.google.com" in lowered or b'type="password"' in lowered):
+        raise RegistrationError("The registration site showed a sign-in page - the session cookie has expired.")
+    return body
