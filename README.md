@@ -16,7 +16,9 @@ Runs on Docker Compose, locally or on an Oracle Cloud Always-Free ARM VM.
 - **Users**: admins manage users; sign in with password and/or Google.
 
 Import columns: `name`, `phone` (required); `category`, `adult`/`מבוגר`, `youth`/`נוער`, `email`, `age`, `notes`.
-A legacy `tickets` column counts as adult tickets. Any invalid row rejects the whole file and lists every problem.
+A legacy `tickets` column counts as adult tickets. `age` may be a decimal (20.5). Valid rows are imported immediately; rows with problems
+are listed on the Manage page so you can correct them and add the guest, or skip them (one by one or *Skip all*). A file that cannot be read at all
+is rejected with a message.
 Phone numbers are stored in international format: local numbers get `DEFAULT_COUNTRY_CODE` (default `972`) and lose a leading `0`;
 numbers written with `+` or `00` are kept.
 

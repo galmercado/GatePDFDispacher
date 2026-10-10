@@ -76,7 +76,7 @@ class AttendeeIn(BaseModel):
     name: str
     phone: str
     email: str | None = None
-    age: int | None = None
+    age: float | None = None
     category: str = data.DEFAULT_CATEGORY
     adult_count: int = 0
     youth_count: int = 0
@@ -130,12 +130,20 @@ class AttendeeIn(BaseModel):
 
     @field_validator("age", mode="before")
     @classmethod
-    def _age_int(cls, v):
-        return None if v is None or (isinstance(v, str) and not v.strip()) else cls._whole(v)
+    def _age_num(cls, v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        try:
+            f = float(str(v).strip().replace(",", "."))   # "20,5" and "20.5" both fine
+        except ValueError:
+            raise ValueError("age must be a number (e.g. 20 or 20.5)")
+        if f != f or f in (float("inf"), float("-inf")):
+            raise ValueError("age must be a number (e.g. 20 or 20.5)")
+        return f
 
     @field_validator("age")
     @classmethod
-    def _age(cls, v: int | None) -> int | None:
+    def _age(cls, v: float | None) -> float | None:
         if v is not None and not 0 <= v <= 120:
             raise ValueError("age must be between 0 and 120")
         return v
@@ -211,8 +219,33 @@ def _rows_from_json(content: bytes) -> list[dict]:
     return data
 
 
-def parse_guest_list(filename: str, content: bytes) -> list[AttendeeIn]:
-    """Parse and validate an .xlsx/.json guest list. All-or-nothing: any bad row aborts."""
+class RowIssue(NamedTuple):
+    label: str            # "Row 7"
+    row: dict             # the row's values as strings, ready to show in a form
+    errors: list[str]
+
+
+class ParseResult(NamedTuple):
+    valid: list[AttendeeIn]
+    issues: list[RowIssue]
+
+
+def _row_as_form(row: dict) -> dict:
+    """Row values as strings; a legacy ticket_count becomes adult_count so the fix form can show it."""
+    out = {k: ("" if v is None else str(v).strip()) for k, v in row.items()}
+    if not (out.get("adult_count") or out.get("youth_count")) and out.get("ticket_count"):
+        out["adult_count"] = out["ticket_count"]
+    return out
+
+
+def describe_validation_error(exc: ValidationError) -> list[str]:
+    return [(f"{'.'.join(str(p) for p in e['loc'])}: " if e["loc"] else "")
+            + e["msg"].removeprefix("Value error, ") for e in exc.errors()]
+
+
+def parse_guest_list(filename: str, content: bytes) -> ParseResult:
+    """Parse an .xlsx/.json guest list. A file that cannot be read at all raises ImportValidationError;
+    otherwise valid rows are returned and each bad row comes back as a RowIssue to fix or skip."""
     ext = Path(filename or "").suffix.lower()
     if ext == ".xlsx":
         rows, offset = _rows_from_xlsx(content), 2  # header occupies spreadsheet row 1
@@ -223,29 +256,25 @@ def parse_guest_list(filename: str, content: bytes) -> list[AttendeeIn]:
     if not rows:
         raise ImportValidationError(["The file contains no guests"])
 
-    parsed: list[AttendeeIn] = []
-    errors: list[str] = []
+    valid: list[AttendeeIn] = []
+    issues: list[RowIssue] = []
     seen: set[tuple[str, str]] = set()
     for i, row in enumerate(rows):
         label = f"Row {i + offset}"
-        row = {k: v for k, v in row.items() if v is not None and str(v).strip() != ""}
+        shown = _row_as_form(row)
+        cleaned = {k: v for k, v in row.items() if v is not None and str(v).strip() != ""}
         try:
-            item = AttendeeIn.model_validate(row)
+            item = AttendeeIn.model_validate(cleaned)
         except ValidationError as exc:
-            for err in exc.errors():
-                field = ".".join(str(p) for p in err["loc"]) or "row"
-                msg = err["msg"].removeprefix("Value error, ")
-                errors.append(f"{label} ({field}): {msg}")
+            issues.append(RowIssue(label, shown, describe_validation_error(exc)))
             continue
         key = (item.name.lower(), item.phone)
         if key in seen:
-            errors.append(f"{label}: duplicate of an earlier row ({item.name}, {item.phone})")
+            issues.append(RowIssue(label, shown, [f"duplicate of an earlier row ({item.name}, {item.phone})"]))
             continue
         seen.add(key)
-        parsed.append(item)
-    if errors:
-        raise ImportValidationError(errors)
-    return parsed
+        valid.append(item)
+    return ParseResult(valid, issues)
 
 
 def import_attendees(db: Session, event_id: int, items: list[AttendeeIn]) -> tuple[int, int]:

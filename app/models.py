@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint,
+    Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -57,7 +57,7 @@ class Attendee(Base):
     name: Mapped[str] = mapped_column(String(255), index=True)
     phone: Mapped[str] = mapped_column(String(32), index=True)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    age: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    age: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Legacy column kept so databases created before categories existed keep working; unused.
     ticket_type: Mapped[str] = mapped_column(String(64), default="Standard")
     category: Mapped[str] = mapped_column(String(32), default="פתוח", index=True)
@@ -121,3 +121,17 @@ class SentMessage(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     delete_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)  # scheduled removal
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ImportIssue(Base):
+    """A guest-list row that failed validation. The valid rows are imported right away; these wait
+    here until the admin fixes them (and adds the guest) or skips them."""
+
+    __tablename__ = "import_issues"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    label: Mapped[str] = mapped_column(String(32))          # e.g. "Row 7"
+    data: Mapped[str] = mapped_column(Text)                 # JSON: the row's values as strings
+    errors: Mapped[str] = mapped_column(Text)               # JSON: list of messages
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

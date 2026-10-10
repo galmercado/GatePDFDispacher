@@ -27,9 +27,9 @@ from .auth import (
 )
 from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
-from .models import Attendee, Event, Role, SentMessage, Ticket, User, utcnow
+from .models import Attendee, Event, ImportIssue, Role, SentMessage, Ticket, User, utcnow
 from .services import (
-    AttendeeIn, ImportValidationError, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
+    AttendeeIn, ImportValidationError, describe_validation_error, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
     import_attendees,
     normalize_phone, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, ticket_status,
 )
@@ -37,6 +37,17 @@ from .services import (
 log = logging.getLogger("gate")
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+def format_age(value) -> str:
+    """20.0 -> "20", 20.5 -> "20.5", None -> ""."""
+    if value is None or value == "":
+        return ""
+    f = float(value)
+    return str(int(f)) if f.is_integer() else f"{f:g}"
+
+
+templates.env.filters["age"] = format_age
 
 
 def seed_admin() -> None:
@@ -414,6 +425,11 @@ def create_event(
     return RedirectResponse("/events", status_code=303)
 
 
+def load_issues(db: Session, event_id: int) -> list[dict]:
+    rows = db.query(ImportIssue).filter(ImportIssue.event_id == event_id).order_by(ImportIssue.id).all()
+    return [{"id": r.id, "label": r.label, "data": json.loads(r.data), "errors": json.loads(r.errors)} for r in rows]
+
+
 def manage_ctx(db: Session, user: User, event: Event, **extra) -> dict:
     tickets = db.query(func.count(Ticket.id)).filter(Ticket.event_id == event.id).scalar()
     status = ticket_status(db, event.id)
@@ -424,7 +440,7 @@ def manage_ctx(db: Session, user: User, event: Event, **extra) -> dict:
     attendees = (db.query(Attendee).options(selectinload(Attendee.tickets))
                  .filter(Attendee.event_id == event.id).order_by(func.lower(Attendee.name), Attendee.id).all())
     return {"user": user, "event": event, "stats": compute_stats(db, event.id),
-            "ticket_files": tickets, "spare_pages": status["spare"], "warnings": warnings, "attendees": attendees, "groups": group_by_category(attendees),
+            "issues": load_issues(db, event.id), "ticket_files": tickets, "spare_pages": status["spare"], "warnings": warnings, "attendees": attendees, "groups": group_by_category(attendees),
             "categories": data.CATEGORIES, "messages": [], "errors": [], **extra}
 
 
@@ -452,16 +468,76 @@ async def import_guest_list(
     try:
         if len(content) > config.MAX_LIST_BYTES:
             raise ImportValidationError(["File is too large (5 MB max)"])
-        items = parse_guest_list(file.filename or "", content)
+        parsed = parse_guest_list(file.filename or "", content)
     except ImportValidationError as exc:
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=exc.errors[:50]), status=422)
-    count, skipped = import_attendees(db, event.id, items)
+    count, skipped = import_attendees(db, event.id, parsed.valid)
+    for issue in parsed.issues:      # bad rows wait for the admin: fix them or skip them
+        db.add(ImportIssue(event_id=event.id, label=issue.label, data=json.dumps(issue.row, ensure_ascii=False),
+                           errors=json.dumps(issue.errors, ensure_ascii=False)))
+    db.commit()
     result = rebalance_tickets(db, event.id)
     msgs = [f"Imported {count} guest(s)." + (f" Skipped {skipped} already on the list." if skipped else "")]
     if result["assigned"]:
         msgs.append(f"Assigned {result['assigned']} spare ticket page(s) automatically.")
-    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs))
+    warnings = ([f"{len(parsed.issues)} row(s) have problems and were NOT imported. Fix them or skip them below."]
+                if parsed.issues else [])
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, warnings=warnings))
+
+
+def get_issue_or_404(db: Session, issue_id: int) -> ImportIssue:
+    issue = db.get(ImportIssue, issue_id)
+    if issue is None:
+        raise HTTPException(404, "That row was already handled")
+    return issue
+
+
+@app.post("/import-issues/{issue_id}/fix", response_class=HTMLResponse)
+def fix_import_issue(
+    issue_id: int, request: Request,
+    name: str = Form(""), phone: str = Form(""), email: str = Form(""), age: str = Form(""),
+    category: str = Form(data.DEFAULT_CATEGORY), adult_count: str = Form(""), youth_count: str = Form(""),
+    notes: str = Form(""),
+    user: User = Depends(require_admin), db: Session = Depends(get_db),
+):
+    issue = get_issue_or_404(db, issue_id)
+    event = get_event_or_404(db, issue.event_id)
+    form = dict(name=name, phone=phone, email=email, age=age, category=category,
+                adult_count=adult_count, youth_count=youth_count, notes=notes)
+    item, errors = validate_attendee_form(**form)
+    if item and is_duplicate(db, event.id, item):
+        errors = [f"{item.name} ({item.phone}) is already on the list."]
+    if errors:        # keep what they typed, show the new problems
+        issue.data, issue.errors = json.dumps(form, ensure_ascii=False), json.dumps(errors, ensure_ascii=False)
+        db.commit()
+        return render(request, "manage.html", manage_ctx(db, user, event), status=422)
+    attendee = Attendee(event_id=event.id, **item.model_dump())
+    db.add(attendee)
+    db.delete(issue)
+    db.commit()
+    rebalance_tickets(db, event.id)
+    return render(request, "manage.html", manage_ctx(db, user, event, **guest_outcome(db, attendee, "Added")))
+
+
+@app.post("/import-issues/{issue_id}/skip", response_class=HTMLResponse)
+def skip_import_issue(issue_id: int, request: Request, user: User = Depends(require_admin),
+                      db: Session = Depends(get_db)):
+    issue = get_issue_or_404(db, issue_id)
+    event = get_event_or_404(db, issue.event_id)
+    label = issue.label
+    db.delete(issue)
+    db.commit()
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=[f"Skipped {label}."]))
+
+
+@app.post("/events/{event_id}/import-issues/skip-all", response_class=HTMLResponse)
+def skip_all_import_issues(event_id: int, request: Request, user: User = Depends(require_admin),
+                           db: Session = Depends(get_db)):
+    event = get_event_or_404(db, event_id)
+    n = db.query(ImportIssue).filter(ImportIssue.event_id == event.id).delete()
+    db.commit()
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=[f"Skipped {n} row(s)."]))
 
 
 @app.post("/events/{event_id}/tickets/upload", response_class=HTMLResponse)

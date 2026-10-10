@@ -78,29 +78,42 @@ def event_id(client):
 # ----------------------------------------------------------------- bulk import validation
 
 def test_parse_json_normalises_valid_rows():
-    items = services.parse_guest_list("g.json", json.dumps({"attendees": GUESTS}).encode())
+    result = services.parse_guest_list("g.json", json.dumps({"attendees": GUESTS}).encode())
+    items = result.valid
+    assert result.issues == []
     assert [i.phone for i in items] == ["15550100001", "15550100002", "15550100003"]
     assert items[1].email == "grace@navy.mil" and items[1].ticket_count == 1
     assert (items[0].category, items[0].adult_count, items[0].youth_count, items[0].ticket_count) == ("חבר ארגון", 1, 1, 2)
     assert (items[2].adult_count, items[2].youth_count, items[2].category) == (2, 0, "פתוח")  # legacy ticket_count
 
 
-def test_parse_json_reports_every_bad_row():
-    bad = [
-        {"name": "", "phone": "15550100001"},
-        {"name": "B", "phone": "123"},
-        {"name": "C", "phone": "15550100003", "age": 200},
-        {"name": "D", "phone": "15550100004", "adult_count": 0, "youth_count": 0},
-        {"name": "E", "phone": "15550100005", "email": "nope"},
-        {"name": "F", "phone": "15550100006"},
-        {"name": "f", "phone": "15550100006"},
+def test_parse_json_separates_good_rows_from_every_bad_row():
+    rows = [
+        {"name": "", "phone": "15550100001"},                       # row 1
+        {"name": "B", "phone": "123"},                              # row 2
+        {"name": "C", "phone": "15550100003", "age": 200},          # row 3
+        {"name": "D", "phone": "15550100004", "adult_count": 0, "youth_count": 0},   # row 4
+        {"name": "E", "phone": "15550100005", "email": "nope"},     # row 5
+        {"name": "F", "phone": "15550100006"},                      # row 6 - ok
+        {"name": "f", "phone": "15550100006"},                      # row 7 - duplicate of 6
+        {"name": "G", "phone": "15550100007", "age": "abc"},        # row 8
+        {"name": "H", "phone": "15550100008", "age": "20.5"},       # row 9 - ok
     ]
-    with pytest.raises(services.ImportValidationError) as exc:
-        services.parse_guest_list("g.json", json.dumps(bad).encode())
-    text = "\n".join(exc.value.errors)
-    for row in ("Row 1", "Row 2", "Row 3", "Row 4", "Row 5", "Row 7"):
-        assert row in text
-    assert "duplicate" in text and "Row 6" not in text
+    result = services.parse_guest_list("g.json", json.dumps(rows).encode())
+    assert [v.name for v in result.valid] == ["F", "H"] and result.valid[1].age == 20.5
+    assert [i.label for i in result.issues] == ["Row 1", "Row 2", "Row 3", "Row 4", "Row 5", "Row 7", "Row 8"]
+    by = {i.label: " ".join(i.errors) for i in result.issues}
+    assert "name" in by["Row 1"] and "phone" in by["Row 2"] and "age" in by["Row 3"] and "tickets" in by["Row 4"]
+    assert "duplicate" in by["Row 7"] and "number" in by["Row 8"]
+    assert result.issues[1].row["name"] == "B"                                  # raw values kept for the fix form
+
+
+def test_age_accepts_decimals():
+    ok = lambda v: services.AttendeeIn(name="A", phone="0501234567", age=v).age   # noqa: E731
+    assert ok(20.5) == 20.5 and ok("20.5") == 20.5 and ok("20,5") == 20.5 and ok(20) == 20.0 and ok("") is None
+    for bad in ("abc", "-1", "121", "nan", "inf"):
+        with pytest.raises(Exception):
+            ok(bad)
 
 
 def test_parse_rejects_bad_files():
@@ -115,7 +128,7 @@ def test_parse_xlsx_with_header_aliases():
                        "מבוגר": [3, 1], "נוער": [1, None], "קטגוריה": ["פלוס", ""]})
     buf = io.BytesIO()
     df.to_excel(buf, index=False)
-    items = services.parse_guest_list("list.xlsx", buf.getvalue())
+    items = services.parse_guest_list("list.xlsx", buf.getvalue()).valid
     assert [(i.name, i.adult_count, i.youth_count, i.category) for i in items] == [
         ("Ada", 3, 1, "פלוס"), ("Grace", 1, 0, "פתוח")]
 
@@ -127,20 +140,72 @@ def test_parse_xlsx_missing_required_column():
         services.parse_guest_list("list.xlsx", buf.getvalue())
 
 
-def test_import_endpoint_is_atomic(admin, event_id):
-    bad = json.dumps([GUESTS[0], {"name": "X", "phone": "1"}]).encode()
-    r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", bad)})
-    assert r.status_code == 422 and "Row 2" in r.text
+def test_import_keeps_good_rows_and_offers_fix_or_skip(admin, event_id):
+    from app.models import ImportIssue
+    rows = [GUESTS[0], {"name": "Bad Phone", "phone": "1", "age": "31.5"}, GUESTS[1],
+            {"name": "Bad Age", "phone": "0501111111", "age": "x"}]
+    r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(rows).encode())})
+    assert r.status_code == 200 and "Imported 2 guest(s)" in r.text
+    assert "2 row(s) need fixing" in r.text and "NOT imported" in r.text
     with SessionLocal() as db:
-        assert db.query(Attendee).filter_by(event_id=event_id).count() == 0
-    r = admin.post(f"/events/{event_id}/attendees/import",
-                   files={"file": ("g.json", json.dumps(GUESTS).encode())})
-    assert r.status_code == 200 and "Imported 3 guest(s)" in r.text
-    r = admin.post(f"/events/{event_id}/attendees/import",                      # re-import: no duplicates
-                   files={"file": ("g.json", json.dumps(GUESTS).encode())})
-    assert "Imported 0 guest(s). Skipped 3 already on the list." in r.text
+        assert db.query(Attendee).filter_by(event_id=event_id).count() == 2
+        issues = db.query(ImportIssue).filter_by(event_id=event_id).order_by(ImportIssue.id).all()
+        assert [i.label for i in issues] == ["Row 2", "Row 4"]
+        bad_phone, bad_age = issues[0].id, issues[1].id
+    # fixing with a still-invalid value keeps the row and shows the new problem
+    form = {"name": "Bad Phone", "phone": "12", "age": "31.5", "category": "מצטרף", "adult_count": "1", "youth_count": "0"}
+    r = admin.post(f"/import-issues/{bad_phone}/fix", data=form)
+    assert r.status_code == 422 and "need fixing" in r.text
+    # a correct fix adds the guest (decimal age kept) and removes the row from the list
+    r = admin.post(f"/import-issues/{bad_phone}/fix", data={**form, "phone": "052-1234567"})
+    assert r.status_code == 200 and "Added Bad Phone" in r.text and "1 row(s) need fixing" in r.text
+    with SessionLocal() as db:
+        g = db.query(Attendee).filter_by(event_id=event_id, name="Bad Phone").one()
+        assert g.age == 31.5 and g.phone == "972521234567" and g.category == "מצטרף"
+        assert db.get(ImportIssue, bad_phone) is None
+    # skipping drops the row without adding anyone
+    r = admin.post(f"/import-issues/{bad_age}/skip")
+    assert r.status_code == 200 and "Skipped Row 4" in r.text and "need fixing" not in r.text
     with SessionLocal() as db:
         assert db.query(Attendee).filter_by(event_id=event_id).count() == 3
+        assert db.query(ImportIssue).filter_by(event_id=event_id).count() == 0
+    assert admin.post(f"/import-issues/{bad_age}/skip").status_code == 404           # already handled
+
+
+def test_skip_all_and_permissions_for_import_issues(admin, doorman, event_id):
+    rows = [{"name": "", "phone": "1"}, {"name": "X", "phone": "2"}, GUESTS[0]]
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(rows).encode())})
+    from app.models import ImportIssue
+    with SessionLocal() as db:
+        first = db.query(ImportIssue).filter_by(event_id=event_id).first().id
+    assert doorman.post(f"/import-issues/{first}/skip").status_code == 403
+    assert doorman.post(f"/import-issues/{first}/fix", data={"name": "A"}).status_code == 403
+    assert doorman.post(f"/events/{event_id}/import-issues/skip-all").status_code == 403
+    r = admin.post(f"/events/{event_id}/import-issues/skip-all")
+    assert "Skipped 2 row(s)" in r.text
+    with SessionLocal() as db:
+        assert db.query(ImportIssue).filter_by(event_id=event_id).count() == 0
+        assert db.query(Attendee).filter_by(event_id=event_id).count() == 1
+
+
+def test_unreadable_file_still_fails_completely(admin, event_id):
+    for name, data in (("g.json", b"{oops"), ("g.csv", b"a,b"), ("g.json", b"[]")):
+        r = admin.post(f"/events/{event_id}/attendees/import", files={"file": (name, data)})
+        assert r.status_code == 422
+    with SessionLocal() as db:
+        assert db.query(Attendee).filter_by(event_id=event_id).count() == 0
+
+
+def test_re_import_does_not_duplicate_and_decimal_age_in_forms(admin, event_id):
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(GUESTS).encode())})
+    r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(GUESTS).encode())})
+    assert "Imported 0 guest(s). Skipped 3 already on the list." in r.text
+    form = {"name": "Age Test", "phone": "0507777777", "category": "פתוח", "adult_count": "1", "youth_count": "0", "age": "19.5"}
+    assert admin.post(f"/events/{event_id}/attendees", data=form).status_code == 200
+    page = admin.get(f"/events/{event_id}/manage").text
+    assert 'value="19.5"' in page and "19.5.0" not in page
+    from app.main import format_age
+    assert (format_age(20.0), format_age(20.5), format_age(None), format_age(7)) == ("20", "20.5", "", "7")
 
 
 # ----------------------------------------------------------------- PDF splitting
