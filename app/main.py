@@ -1,6 +1,7 @@
 """FastAPI application: routes, templates and exception handlers."""
 import asyncio
 import json
+import shutil
 import random
 import uuid
 import secrets
@@ -27,11 +28,11 @@ from .auth import (
 )
 from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
-from .models import Attendee, Event, ImportIssue, Role, SentMessage, Ticket, User, utcnow
+from .models import Attendee, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, Ticket, User, utcnow
 from .services import (
     AttendeeIn, ImportValidationError, describe_validation_error, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
     import_attendees,
-    normalize_phone, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, ticket_status,
+    event_ticket_dir, normalize_phone, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, ticket_status,
 )
 
 log = logging.getLogger("gate")
@@ -78,7 +79,7 @@ def seed_admin() -> None:
             )
 
 
-async def revoke_message(db: Session, msg: SentMessage) -> bool:
+async def revoke_message(db: Session, msg: SentMessage | OrphanMessage) -> bool:
     """Delete one sent ticket message for everyone; record the outcome. Returns success."""
     try:
         await delete_whatsapp_message(msg.remote_jid, msg.message_id)
@@ -126,29 +127,30 @@ def schedule_delete_at(event: Event, now: datetime | None = None) -> datetime:
 
 
 async def cleanup_due_messages(now: datetime | None = None) -> int:
-    """Delete ticket messages whose scheduled time has come. Messages are deleted one by one with
-    random pauses; a failed deletion is retried after a random 30-90 min; after 47 h (WhatsApp no longer
-    allows it) a message is marked expired. Returns the number deleted."""
+    """Delete ticket messages whose scheduled time has come (also those of deleted events). Messages
+    are deleted one by one with random pauses; a failed deletion is retried after a random 30-90 min;
+    after 47 h (WhatsApp no longer allows it) a message is marked expired. Returns the number deleted."""
     if not config.WHATSAPP_DELETE_AFTER_EVENT:
         return 0
     now = now or utcnow()
     stale = now - timedelta(hours=config.WHATSAPP_DELETE_GIVE_UP_HOURS)
     deleted = 0
     with SessionLocal() as db:
-        for msg in db.query(SentMessage).filter(SentMessage.status == "sent").order_by(SentMessage.sent_at).all():
-            if msg.delete_at is None:  # message from before scheduling existed
-                event = db.get(Event, msg.event_id)
-                msg.delete_at = schedule_delete_at(event, now) if event else now
-                db.commit()
-            if msg.delete_at > now:
-                continue
-            if msg.sent_at <= stale:
-                msg.status = "expired"
-                db.commit()
-                continue
-            if deleted:
-                await asyncio.sleep(random.uniform(*config.WHATSAPP_DELETE_GAP))
-            deleted += await revoke_message(db, msg)   # on failure it schedules its own retry
+        for model in (SentMessage, OrphanMessage):
+            for msg in db.query(model).filter(model.status == "sent").order_by(model.sent_at).all():
+                if msg.delete_at is None:  # message from before scheduling existed
+                    event = db.get(Event, msg.event_id) if model is SentMessage else None
+                    msg.delete_at = schedule_delete_at(event, now) if event else now
+                    db.commit()
+                if msg.delete_at > now:
+                    continue
+                if msg.sent_at <= stale:
+                    msg.status = "expired"
+                    db.commit()
+                    continue
+                if deleted:
+                    await asyncio.sleep(random.uniform(*config.WHATSAPP_DELETE_GAP))
+                deleted += await revoke_message(db, msg)   # on failure it schedules its own retry
     return deleted
 
 
@@ -378,7 +380,7 @@ def logout():
 def events_ctx(db: Session, user: User, **extra) -> dict:
     events = db.query(Event).order_by(Event.event_date.desc()).all()
     return {"user": user, "events": events, "stats": {e.id: compute_stats(db, e.id) for e in events},
-            "error": None, "opponents": data.OPPONENTS, "arenas": data.ARENAS,
+            "error": None, "messages": [], "opponents": data.OPPONENTS, "arenas": data.ARENAS,
             "default_location": data.DEFAULT_LOCATION, "OTHER": data.OTHER,
             "home_team": data.HOME_TEAM, "versus": data.VERSUS,
             "other_opponent": data.OTHER_LABEL_OPPONENT, "other_location": data.OTHER_LABEL_LOCATION, **extra}
@@ -473,17 +475,23 @@ async def import_guest_list(
     except ImportValidationError as exc:
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=exc.errors[:50]), status=422)
-    count, skipped = import_attendees(db, event.id, parsed.valid)
+    outcome = import_attendees(db, event.id, parsed.valid)
     for issue in parsed.issues:      # bad rows wait for the admin: fix them or skip them
         db.add(ImportIssue(event_id=event.id, label=issue.label, data=json.dumps(issue.row, ensure_ascii=False),
                            errors=json.dumps(issue.errors, ensure_ascii=False)))
     db.commit()
     result = rebalance_tickets(db, event.id)
-    msgs = [f"Imported {count} guest(s)." + (f" Skipped {skipped} already on the list." if skipped else "")]
+    msgs = [f"Imported {outcome.added} guest(s)."]
+    if outcome.updated:
+        shown = "; ".join(outcome.changes[:12]) + (f"; … and {len(outcome.changes) - 12} more" if len(outcome.changes) > 12 else "")
+        msgs.append(f"Updated {outcome.updated} existing guest(s): {shown}")
+    if outcome.unchanged:
+        msgs.append(f"{outcome.unchanged} existing guest(s) already up to date.")
     if result["assigned"]:
         msgs.append(f"Assigned {result['assigned']} spare ticket page(s) automatically.")
-    warnings = ([f"{len(parsed.issues)} row(s) have problems and were NOT imported. Fix them or skip them below."]
-                if parsed.issues else [])
+    warnings = list(outcome.warnings)
+    if parsed.issues:
+        warnings.append(f"{len(parsed.issues)} row(s) have problems and were NOT imported. Fix them or skip them below.")
     if parsed.ignored:
         warnings.append("These columns/keys were not recognised and were ignored: " + ", ".join(parsed.ignored)
                         + ". Recognised: name, phone, category, adult/מבוגר, youth/נוער, email, age, notes.")
@@ -562,6 +570,29 @@ async def upload_ticket_pdf(
     if result["spare"]:
         msgs.append(f"{result['spare']} spare page(s) are waiting for new guests.")
     return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs))
+
+
+@app.post("/events/{event_id}/delete", response_class=HTMLResponse)
+def delete_event(event_id: int, request: Request, user: User = Depends(require_admin),
+                 db: Session = Depends(get_db)):
+    """Delete an event with its guests, tickets and uploaded PDFs. Ticket messages already sent on
+    WhatsApp are kept in a link-free queue so they are still deleted at their scheduled time."""
+    event = get_event_or_404(db, event_id)
+    name = event.name
+    live = db.query(SentMessage).filter(SentMessage.event_id == event.id, SentMessage.status == "sent").all()
+    for msg in live:
+        db.add(OrphanMessage(remote_jid=msg.remote_jid, message_id=msg.message_id, sent_at=msg.sent_at,
+                             delete_at=msg.delete_at or schedule_delete_at(event), attempts=msg.attempts))
+    for model in (SentMessage, SpareTicket, ImportIssue, Ticket):
+        db.query(model).filter(model.event_id == event.id).delete()
+    db.query(Attendee).filter(Attendee.event_id == event.id).delete()
+    db.delete(event)
+    db.commit()
+    shutil.rmtree(event_ticket_dir(event_id), ignore_errors=True)
+    msgs = [f"Deleted “{name}” with its guests and tickets."]
+    if live:
+        msgs.append(f"{len(live)} WhatsApp ticket message(s) will still be removed at their scheduled time.")
+    return render(request, "events.html", events_ctx(db, user, messages=msgs))
 
 
 # --------------------------------------------------------------------------- manual attendees

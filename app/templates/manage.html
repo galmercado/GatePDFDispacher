@@ -162,6 +162,15 @@
   {% endfor %}
   </div>
 </section>
+
+<section class="mt-8 rounded-2xl border border-rose-500/30 p-5">
+  <h2 class="mb-1 flex items-center gap-2 font-semibold text-rose-300"><i class="ph ph-warning"></i> Danger zone</h2>
+  <p class="mb-3 text-sm text-slate-400">Deleting the event removes all its guests, tickets and uploaded PDFs. WhatsApp ticket messages already sent are still removed at their scheduled time.</p>
+  <form method="post" action="/events/{{ event.id }}/delete"
+        onsubmit="return confirm('Delete this event with all its guests, tickets and uploaded PDFs? This cannot be undone.')">
+    <button class="flex items-center gap-2 rounded-xl border border-rose-500/50 px-4 py-2.5 text-sm font-semibold text-rose-300 hover:bg-rose-500/10"><i class="ph ph-trash"></i> Delete event</button>
+  </form>
+</section>
 <script>
   document.getElementById('guest-filter').addEventListener('input', (e) => {
     const q = e.target.value.trim().toLowerCase();

@@ -135,3 +135,19 @@ class ImportIssue(Base):
     data: Mapped[str] = mapped_column(Text)                 # JSON: the row's values as strings
     errors: Mapped[str] = mapped_column(Text)               # JSON: list of messages
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class OrphanMessage(Base):
+    """A ticket message whose event was deleted. Kept (without any link to the event) so the scheduled
+    random deletion on WhatsApp still happens."""
+
+    __tablename__ = "orphan_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    remote_jid: Mapped[str] = mapped_column(String(64))
+    message_id: Mapped[str] = mapped_column(String(128))
+    sent_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(16), default="sent", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    delete_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

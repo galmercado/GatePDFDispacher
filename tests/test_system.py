@@ -199,7 +199,7 @@ def test_unreadable_file_still_fails_completely(admin, event_id):
 def test_re_import_does_not_duplicate_and_decimal_age_in_forms(admin, event_id):
     admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(GUESTS).encode())})
     r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(GUESTS).encode())})
-    assert "Imported 0 guest(s). Skipped 3 already on the list." in r.text
+    assert "Imported 0 guest(s)." in r.text and "3 existing guest(s) already up to date" in r.text
     form = {"name": "Age Test", "phone": "0507777777", "category": "פתוח", "adult_count": "1", "youth_count": "0", "age": "19.5"}
     assert admin.post(f"/events/{event_id}/attendees", data=form).status_code == 200
     page = admin.get(f"/events/{event_id}/manage").text
@@ -1084,3 +1084,89 @@ def test_json_alias_counts_reach_the_database(admin, event_id):
     with SessionLocal() as db:
         g = db.query(Attendee).filter_by(event_id=event_id, name="Big Group").one()
         assert (g.adult_count, g.youth_count, g.ticket_count) == (3, 2, 5)
+
+
+def test_reimport_updates_existing_guests_but_only_provided_fields(admin, event_id):
+    base = [{"name": "Dana Levi", "phone": "0501111111", "adult": 1, "youth": 0, "category": "פתוח", "age": 30, "notes": "keep me"},
+            {"name": "Noa Bar", "phone": "0502222222", "adult": 2, "youth": 1}]
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(base).encode())})
+    admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(4))})
+    again = [{"name": "Dana Levi", "phone": "0501111111", "adult": 4, "youth": 2, "category": "פלוס", "age": 30.5},   # changed
+             {"name": "Noa Bar", "phone": "0502222222", "adult": 2},                  # same adults; youth not given -> keep
+             {"name": "New Person", "phone": "0503333333", "adult": 1}]
+    r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(again).encode())})
+    assert "Imported 1 guest(s)." in r.text and "Updated 1 existing guest(s)" in r.text
+    assert "tickets adult 1→4, youth 0→2" in r.text and "category פתוח→פלוס" in r.text and "1 existing guest(s) already up to date" in r.text
+    with SessionLocal() as db:
+        dana = db.query(Attendee).filter_by(event_id=event_id, name="Dana Levi").one()
+        assert (dana.adult_count, dana.youth_count, dana.ticket_count, dana.category, dana.age) == (4, 2, 6, "פלוס", 30.5)
+        assert dana.notes == "keep me"                                              # not in the file -> untouched
+        noa = db.query(Attendee).filter_by(event_id=event_id, name="Noa Bar").one()
+        assert (noa.adult_count, noa.youth_count) == (2, 1)
+        assert db.query(Attendee).filter_by(event_id=event_id).count() == 3
+        # ticket PDFs follow the new counts: 7 pages needed now (6 + 0 + 3?), pool had none spare
+        assert len(dana.tickets) <= dana.ticket_count
+    assert "still have no PDF" in r.text                                             # shortfall is flagged
+
+
+def test_reimport_can_lower_tickets_and_frees_pages(admin, event_id):
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(
+        [{"name": "Big", "phone": "0501111111", "adult": 3}, {"name": "Wait", "phone": "0502222222", "adult": 2}]).encode())})
+    admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(4))})   # Big 3, Wait 1 of 2
+    r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(
+        [{"name": "Big", "phone": "0501111111", "adult": 2}]).encode())})
+    assert "tickets adult 3→2" in r.text
+    with SessionLocal() as db:
+        got = {a.name: len(a.tickets) for a in db.query(Attendee).filter_by(event_id=event_id)}
+    assert got == {"Big": 2, "Wait": 2}                                              # freed page went to the waiting guest
+
+
+def test_legacy_ticket_total_and_zero_ticket_guard_on_update(admin, event_id):
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(
+        [{"name": "Kid Only", "phone": "0501111111", "adult": 0, "youth": 2}]).encode())})
+    r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(
+        [{"name": "Kid Only", "phone": "0501111111", "adult": 0, "youth": 0}]).encode())})
+    assert r.status_code == 200 and "NOT imported" in r.text                          # invalid row -> fix/skip panel
+    r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(
+        [{"name": "Kid Only", "phone": "0501111111", "tickets": 3}]).encode())})
+    with SessionLocal() as db:
+        g = db.query(Attendee).filter_by(event_id=event_id, name="Kid Only").one()
+        assert (g.adult_count, g.youth_count) == (3, 0)                                # legacy total = adults
+    r = admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(
+        [{"name": "Kid Only", "phone": "0501111111", "adult": 0}]).encode())})         # 0 tickets in total
+    assert "NOT imported" in r.text                                                  # flagged for fix/skip, nothing changed
+    with SessionLocal() as db:
+        assert db.query(Attendee).filter_by(event_id=event_id, name="Kid Only").one().adult_count == 3
+
+
+def test_delete_event_removes_everything_and_keeps_whatsapp_cleanup(admin, doorman, wa, monkeypatch):
+    import asyncio
+    from datetime import timedelta
+    from app.main import cleanup_due_messages
+    from app.models import Event, ImportIssue, OrphanMessage, SentMessage, SpareTicket, utcnow
+    admin.post("/events", data={"opponent": "הפועל חולון", "event_date": "2031-01-01T20:00"})
+    with SessionLocal() as db:
+        eid = db.query(Event).order_by(Event.id.desc()).first().id
+    admin.post(f"/events/{eid}/attendees/import", files={"file": ("g.json", json.dumps(GUESTS + [{"name": "", "phone": "1"}]).encode())})
+    admin.post(f"/events/{eid}/tickets/upload", files={"file": ("a.pdf", make_pdf(7))})
+    with SessionLocal() as db:
+        ada = db.query(Attendee).filter_by(event_id=eid, name="Ada Lovelace").one().id
+    doorman.post(f"/attendees/{ada}/whatsapp")
+    folder = config.STORAGE_DIR / "tickets" / str(eid)
+    assert folder.exists()
+    assert doorman.post(f"/events/{eid}/delete").status_code == 403
+    r = admin.post(f"/events/{eid}/delete")
+    assert r.status_code == 200 and "Deleted" in r.text and "2 WhatsApp ticket message(s)" in r.text
+    assert not folder.exists()
+    with SessionLocal() as db:
+        assert db.get(Event, eid) is None
+        for model in (Attendee, SpareTicket, ImportIssue, Ticket, SentMessage):
+            assert db.query(model).filter_by(event_id=eid).count() == 0, model
+        orphans = db.query(OrphanMessage).all()
+        assert len(orphans) == 2
+        for o in orphans:
+            o.delete_at = utcnow() - timedelta(minutes=1)
+        db.commit()
+    monkeypatch.setattr(config, "WHATSAPP_DELETE_GAP", (0.0, 0.0))
+    assert asyncio.run(cleanup_due_messages()) == 2 and sorted(wa["deleted"]) == ["MSG1", "MSG2"]
+    assert admin.post(f"/events/{eid}/delete").status_code == 404

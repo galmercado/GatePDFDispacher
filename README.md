@@ -5,7 +5,7 @@ Runs on Docker Compose, locally or on an Oracle Cloud Always-Free ARM VM.
 
 ## What it does
 
-- **Events** (admin): opponent picker (`מכבי תל אביב נגד …`), arena picker (default *בית (היכל מנורה מבטחים)*), calendar date/time.
+- **Events** (admin; can be deleted with all their guests, tickets and PDFs): opponent picker (`מכבי תל אביב נגד …`), arena picker (default *בית (היכל מנורה מבטחים)*), calendar date/time.
 - **Guests**: bulk import (`.xlsx` / `.json`) or add/edit/remove manually. Each guest has a **category**
   (חבר ארגון · מצטרף · פלוס · פתוח) and any mix of **מבוגר (adult)** and **נוער (youth)** tickets.
 - **Tickets**: upload a merged PDF (a progress bar with percent and a Cancel button shows while it uploads); it is split per page and handed out automatically to guests who lack tickets. Extra pages wait in a
@@ -16,7 +16,7 @@ Runs on Docker Compose, locally or on an Oracle Cloud Always-Free ARM VM.
 - **Users**: admins manage users; sign in with password and/or Google.
 
 Import columns (spreadsheet headers *and* JSON keys; case/space/underscore insensitive, e.g. `adult`, `Adults`, `adult_count`, `מבוגר` all work): `name`, `phone` (required); `category`, `adult`/`מבוגר`, `youth`/`נוער`, `email`, `age`, `notes`.
-A legacy `tickets` column counts as adult tickets. Columns/keys that are not recognised are reported after the import instead of being silently ignored. `age` may be a decimal (20.5). Valid rows are imported immediately; rows with problems
+A legacy `tickets` column counts as adult tickets. Columns/keys that are not recognised are reported after the import instead of being silently ignored. `age` may be a decimal (20.5). Valid rows are imported immediately; **re-importing a list updates existing guests** (same name + phone) with the fields the file contains - e.g. changed ticket counts or category - and leaves fields the file doesn't mention alone; rows with problems
 are listed on the Manage page so you can correct them and add the guest, or skip them (one by one or *Skip all*). A file that cannot be read at all
 is rejected with a message.
 Phone numbers are stored in international format: local numbers get `DEFAULT_COUNTRY_CODE` (default `972`) and lose a leading `0`;

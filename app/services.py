@@ -13,7 +13,7 @@ from typing import NamedTuple
 
 import httpx
 import pandas as pd
-from pydantic import BaseModel, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from pypdf import PdfReader, PdfWriter
 from pypdf.errors import PyPdfError
 from sqlalchemy import func
@@ -108,6 +108,8 @@ class AttendeeIn(BaseModel):
     youth_count: int = 0
     ticket_count: int = 0  # derived; as input it is a legacy "total" meaning adult tickets
     notes: str | None = None
+    # which keys the source row actually contained (so a re-import only updates those); not stored
+    provided: frozenset[str] = Field(default=frozenset(), exclude=True)
 
     @field_validator("name")
     @classmethod
@@ -291,6 +293,7 @@ def parse_guest_list(filename: str, content: bytes) -> ParseResult:
         except ValidationError as exc:
             issues.append(RowIssue(label, shown, describe_validation_error(exc)))
             continue
+        item.provided = frozenset(cleaned)
         key = (item.name.lower(), item.phone)
         if key in seen:
             issues.append(RowIssue(label, shown, [f"duplicate of an earlier row ({item.name}, {item.phone})"]))
@@ -300,15 +303,62 @@ def parse_guest_list(filename: str, content: bytes) -> ParseResult:
     return ParseResult(valid, issues, list(ignored))
 
 
-def import_attendees(db: Session, event_id: int, items: list[AttendeeIn]) -> tuple[int, int]:
-    """Add guests; anyone already on the event (same name + phone) is skipped, so re-importing
-    a list never duplicates people or inflates the ticket total. Returns (added, skipped)."""
-    existing = {(a.name.lower(), a.phone) for a in
-                db.query(Attendee.name, Attendee.phone).filter(Attendee.event_id == event_id)}
-    new = [i for i in items if (i.name.lower(), i.phone) not in existing]
-    db.add_all(Attendee(event_id=event_id, **item.model_dump()) for item in new)
+class ImportOutcome(NamedTuple):
+    added: int
+    updated: int
+    unchanged: int
+    changes: list[str]      # human-readable list of what changed on existing guests
+    warnings: list[str]
+
+
+def _fmt(value) -> str:
+    if value is None or value == "":
+        return "-"
+    return f"{value:g}" if isinstance(value, float) else str(value)
+
+
+def import_attendees(db: Session, event_id: int, items: list[AttendeeIn]) -> ImportOutcome:
+    """Add new guests and update existing ones (same name + phone) with whatever the file provides.
+
+    Only fields present in the source row are changed, so a row with just name + phone never resets
+    anything. Ticket counts follow adult/youth if given (a legacy 'tickets' total means adults).
+    """
+    existing = {(a.name.lower(), a.phone): a for a in
+                db.query(Attendee).filter(Attendee.event_id == event_id)}
+    added = updated = unchanged = 0
+    changes: list[str] = []
+    warnings: list[str] = []
+    for item in items:
+        guest = existing.get((item.name.lower(), item.phone))
+        if guest is None:
+            guest = Attendee(event_id=event_id, **item.model_dump())
+            db.add(guest)
+            existing[(item.name.lower(), item.phone)] = guest
+            added += 1
+            continue
+        diffs: list[str] = []
+        for field in ("email", "age", "category", "notes"):
+            if field in item.provided and getattr(item, field) != getattr(guest, field):
+                diffs.append(f"{field} {_fmt(getattr(guest, field))}→{_fmt(getattr(item, field))}")
+                setattr(guest, field, getattr(item, field))
+        if item.provided & {"adult_count", "youth_count", "ticket_count"}:
+            if item.provided & {"adult_count", "youth_count"}:
+                adult = item.adult_count if "adult_count" in item.provided else guest.adult_count
+                youth = item.youth_count if "youth_count" in item.provided else guest.youth_count
+            else:                                   # legacy total
+                adult, youth = item.ticket_count, 0
+            if adult + youth < 1:
+                warnings.append(f"{guest.name}: the file would leave 0 tickets - counts left unchanged.")
+            elif (adult, youth) != (guest.adult_count, guest.youth_count):
+                diffs.append(f"tickets adult {guest.adult_count}→{adult}, youth {guest.youth_count}→{youth}")
+                guest.adult_count, guest.youth_count, guest.ticket_count = adult, youth, adult + youth
+        if diffs:
+            updated += 1
+            changes.append(f"{guest.name}: " + ", ".join(diffs))
+        else:
+            unchanged += 1
     db.commit()
-    return len(new), len(items) - len(new)
+    return ImportOutcome(added, updated, unchanged, changes, warnings)
 
 
 # --------------------------------------------------------------------------- PDFs
