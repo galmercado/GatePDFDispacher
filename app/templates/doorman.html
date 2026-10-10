@@ -37,6 +37,7 @@
   document.body.addEventListener('htmx:afterSwap', (e) => {
     if (e.detail.target.id === 'qr-content' && !qrModal.open) qrModal.showModal();
   });
+  document.body.addEventListener('closeModal', () => qrModal.close());
   qrModal.addEventListener('click', (e) => { if (e.target === qrModal) qrModal.close(); });
 </script>
 {% endblock %}

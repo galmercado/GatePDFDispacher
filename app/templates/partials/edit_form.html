@@ -1,0 +1,30 @@
+{% set f = form or {'name': attendee.name, 'phone': attendee.phone, 'email': attendee.email or '', 'age': attendee.age|age,
+                    'category': attendee.category, 'adult_count': attendee.adult_count, 'youth_count': attendee.youth_count,
+                    'notes': attendee.notes or ''} %}
+{% set field = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white outline-none focus:border-brand-400" %}
+{% set label = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" %}
+<div class="mb-3 flex items-start justify-between gap-3">
+  <div class="min-w-0"><h2 class="text-lg font-semibold text-white">Edit guest</h2>
+    <p class="text-xs text-slate-400">Admin only · {{ attendee.admitted_total }} of {{ attendee.ticket_count }} admitted</p></div>
+  <button type="button" onclick="document.getElementById('qr-modal').close()" class="text-slate-400 hover:text-white" aria-label="Close"><i class="ph ph-x text-xl"></i></button>
+</div>
+{% if errors %}<div class="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">
+  <ul class="list-inside list-disc">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+<form hx-post="/attendees/{{ attendee.id }}/door-edit" hx-target="#qr-content" hx-swap="innerHTML" class="grid gap-3">
+  <div class="grid grid-cols-2 gap-3 rounded-xl bg-slate-950 p-3">
+    <div><label class="{{ label }}" dir="rtl">מבוגר (adult)</label>
+      <input name="adult_count" type="number" inputmode="numeric" min="0" max="50" required value="{{ f.adult_count }}" class="{{ field }} text-center text-xl font-semibold"></div>
+    <div><label class="{{ label }}" dir="rtl">נוער (youth)</label>
+      <input name="youth_count" type="number" inputmode="numeric" min="0" max="50" required value="{{ f.youth_count }}" class="{{ field }} text-center text-xl font-semibold"></div>
+  </div>
+  <div><label class="{{ label }}">Name</label><input name="name" required value="{{ f.name }}" class="{{ field }}"></div>
+  <div><label class="{{ label }}">Phone</label><input name="phone" required inputmode="tel" value="{{ f.phone }}" class="{{ field }}"></div>
+  <div><label class="{{ label }}">Category</label>
+    <select name="category" dir="rtl" class="{{ field }}">{% for c in categories %}<option value="{{ c }}" {{ 'selected' if f.category == c }}>{{ c }}</option>{% endfor %}</select></div>
+  <div class="grid grid-cols-2 gap-3">
+    <div><label class="{{ label }}">Email</label><input name="email" value="{{ f.email }}" class="{{ field }}"></div>
+    <div><label class="{{ label }}">Age</label><input name="age" inputmode="decimal" value="{{ f.age }}" class="{{ field }}"></div>
+  </div>
+  <div><label class="{{ label }}">Notes</label><input name="notes" value="{{ f.notes }}" class="{{ field }}"></div>
+  <button class="flex items-center justify-center gap-2 rounded-xl bg-brand-500 py-3 font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-floppy-disk"></i> Save</button>
+</form>

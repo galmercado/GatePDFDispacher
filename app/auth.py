@@ -75,6 +75,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     user = db.get(User, int(payload["sub"]))
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    request.state.user = user   # lets templates show admin-only controls
     return user
 
 

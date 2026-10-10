@@ -11,8 +11,11 @@ Runs on Docker Compose, locally or on an Oracle Cloud Always-Free ARM VM.
 - **Tickets**: upload a merged PDF (a progress bar with percent and a Cancel button shows while it uploads); it is split per page and handed out automatically to guests who lack tickets. Extra pages wait in a
   spare pool; new or edited guests get spare pages automatically, and if none are left you get a warning - upload more pages later and
   they are assigned. Removing a guest or lowering their count returns pages to the pool (with a fresh link).
+- **Partial entry**: *Partial send* on a card (orders with 2+ tickets) opens a popup to choose how many adult/youth tickets to hand out now, by
+  WhatsApp or QR. Only those tickets are admitted ("Partial 1/3"); later the WhatsApp/QR buttons send the rest, or send another partial amount.
+  Undo resets the whole order.
 - **Door cockpit** (admin + doorman): search, guests grouped by category with live counters, admitted total for all types
-  at the top. WhatsApp and QR buttons both admit the guest; a small side button toggles admission only.
+  at the top. WhatsApp and QR buttons both admit the guest; a small side button toggles admission only. Admins also get an *Edit* button on every card (e.g. to change the ticket amount); doormen can only admit.
 - **Users**: admins manage users; sign in with password and/or Google.
 
 Import columns (spreadsheet headers *and* JSON keys; case/space/underscore insensitive, e.g. `adult`, `Adults`, `adult_count`, `מבוגר` all work): `name`, `phone` (required); `category`, `adult`/`מבוגר`, `youth`/`נוער`, `email`, `age`, `notes`.

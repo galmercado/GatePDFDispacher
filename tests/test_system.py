@@ -1170,3 +1170,146 @@ def test_delete_event_removes_everything_and_keeps_whatsapp_cleanup(admin, doorm
     monkeypatch.setattr(config, "WHATSAPP_DELETE_GAP", (0.0, 0.0))
     assert asyncio.run(cleanup_due_messages()) == 2 and sorted(wa["deleted"]) == ["MSG1", "MSG2"]
     assert admin.post(f"/events/{eid}/delete").status_code == 404
+
+
+# ----------------------------------------------------------------- partial entry, admin edit on the door, event delete button
+
+def party(admin, event_id, adult=2, youth=1, pages=None):
+    rows = [{"name": "Party Order", "phone": "0501234500", "adult": adult, "youth": youth}]
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(rows).encode())})
+    admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(pages or adult + youth))})
+    with SessionLocal() as db:
+        return db.query(Attendee).filter_by(event_id=event_id, name="Party Order").one().id
+
+
+def admitted(att_id):
+    with SessionLocal() as db:
+        a = db.get(Attendee, att_id)
+        return (a.admitted_adult, a.admitted_youth, a.checked_in, [bool(t.delivered_at) for t in a.tickets])
+
+
+def test_partial_whatsapp_send_then_the_rest(admin, doorman, event_id, wa):
+    att = party(admin, event_id)                                   # 2 adults + 1 youth = 3 tickets
+    form = doorman.get(f"/attendees/{att}/partial-form")
+    assert form.status_code == 200 and "Partial send" in form.text and "WhatsApp" in form.text
+    r = doorman.post(f"/attendees/{att}/partial", data={"adult": "1", "youth": "0", "via": "whatsapp"})
+    assert 'hx-swap-oob="true"' in r.text and "Partial 1/3" in r.text
+    assert "2 still to come" in r.headers["HX-Trigger"] and "closeModal" in r.headers["HX-Trigger-After-Swap"]
+    assert admitted(att) == (1, 0, True, [True, False, False]) and wa["sent"] == ["MSG1"]
+    stats = doorman.get(f"/events/{event_id}/stats").text
+    assert 'id="stat-admitted">1<' in stats and 'id="stat-remaining">2<' in stats
+    # the main buttons now hand out the rest
+    card = doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    assert "rest (2)" in card and "Partial send" in card
+    # another partial amount: one youth ticket
+    doorman.post(f"/attendees/{att}/partial", data={"adult": "0", "youth": "1", "via": "whatsapp"})
+    assert admitted(att) == (1, 1, True, [True, True, False]) and wa["sent"] == ["MSG1", "MSG2"]
+    # the rest with the main WhatsApp button
+    r = doorman.post(f"/attendees/{att}/whatsapp")
+    assert wa["sent"] == ["MSG1", "MSG2", "MSG3"] and "Sent 1 ticket to" in r.headers["HX-Trigger"]
+    assert admitted(att) == (2, 1, True, [True, True, True])
+    assert "Partial send" not in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text   # nothing left
+
+
+def test_partial_by_qr_shows_only_the_chosen_tickets(admin, doorman, event_id):
+    att = party(admin, event_id, adult=2, youth=0)
+    r = doorman.post(f"/attendees/{att}/partial", data={"adult": "1", "youth": "0", "via": "qr"})
+    assert r.text.count("data:image/svg+xml") == 1 and "1 of 2 tickets shown" in r.text and "Partial 1/2" in r.text
+    assert admitted(att) == (1, 0, True, [True, False])
+    r = doorman.post(f"/attendees/{att}/qr")                        # main QR button: the rest
+    assert r.text.count("data:image/svg+xml") == 1 and admitted(att) == (2, 0, True, [True, True])
+
+
+def test_partial_send_validation_and_whatsapp_failure(admin, doorman, event_id, wa):
+    att = party(admin, event_id, adult=2, youth=0)
+    for bad in ({"adult": "3", "youth": "0"}, {"adult": "0", "youth": "0"}, {"adult": "x", "youth": "0"},
+                {"adult": "-1", "youth": "0"}, {"adult": "0", "youth": "1"}):
+        r = doorman.post(f"/attendees/{att}/partial", data={**bad, "via": "whatsapp"})
+        assert r.status_code == 200 and "role=\"alert\"" in r.text, bad
+    assert admitted(att) == (0, 0, False, [False, False]) and wa["sent"] == []
+    assert "Choose WhatsApp or QR" in doorman.post(f"/attendees/{att}/partial", data={"adult": "1", "youth": "0", "via": "pigeon"}).text
+
+    async def boom(*a, **k):
+        raise services.WhatsAppError("gateway down")
+    import pytest as _pt
+    mp = _pt.MonkeyPatch()
+    mp.setattr("app.main.send_whatsapp_pdf", boom)
+    try:
+        r = doorman.post(f"/attendees/{att}/partial", data={"adult": "1", "youth": "0", "via": "whatsapp"})
+    finally:
+        mp.undo()
+    assert "gateway down" in r.text and admitted(att) == (0, 0, False, [False, False])   # nobody admitted on failure
+
+
+def test_partial_stops_when_not_enough_ticket_pdfs(admin, doorman, event_id, wa):
+    att = party(admin, event_id, adult=2, youth=0, pages=1)         # only 1 PDF page for 2 tickets
+    r = doorman.post(f"/attendees/{att}/partial", data={"adult": "2", "youth": "0", "via": "whatsapp"})
+    assert "Only 1 ticket PDF(s) are available" in r.text and wa["sent"] == []
+
+
+def test_undo_resets_partial_entry(admin, doorman, event_id, wa):
+    att = party(admin, event_id, adult=2, youth=0)
+    doorman.post(f"/attendees/{att}/partial", data={"adult": "1", "youth": "0", "via": "whatsapp"})
+    r = toggle(doorman, att)                                         # undo after a partial entry
+    assert "Waiting" in r.text and wa["deleted"] == ["MSG1"] and admitted(att) == (0, 0, False, [False, False])
+    doorman.post(f"/attendees/{att}/whatsapp")                       # sends both again
+    assert admitted(att) == (2, 0, True, [True, True])
+
+
+def test_only_admin_can_edit_on_the_door_page(admin, doorman, event_id):
+    ada = seeded_event(admin, event_id)
+    page = doorman.get(f"/events/{event_id}/door").text
+    assert "/edit-form" not in page and "Edit</button>" not in page                   # doorman: no edit button
+    assert "/edit-form" in admin.get(f"/events/{event_id}/door").text
+    assert doorman.get(f"/attendees/{ada}/edit-form").status_code == 403
+    form = {"name": "Ada Lovelace", "phone": "+1 (555) 010-0001", "category": "פלוס", "adult_count": "3",
+            "youth_count": "2", "email": "", "age": "", "notes": ""}
+    assert doorman.post(f"/attendees/{ada}/door-edit", data=form).status_code == 403
+    assert admin.get(f"/attendees/{ada}/edit-form").status_code == 200
+    r = admin.post(f"/attendees/{ada}/door-edit", data=form)
+    assert 'hx-swap-oob="true"' in r.text and "5 ticket(s)" in r.headers["HX-Trigger"] and "closeModal" in r.headers["HX-Trigger-After-Swap"]
+    with SessionLocal() as db:
+        a = db.get(Attendee, ada)
+        assert (a.adult_count, a.youth_count, a.ticket_count, a.category) == (3, 2, 5, "פלוס")
+    bad = admin.post(f"/attendees/{ada}/door-edit", data={**form, "adult_count": "0", "youth_count": "0"})
+    assert bad.status_code == 200 and 'role="alert"' in bad.text and 'name="adult_count"' in bad.text
+
+
+def test_editing_amount_keeps_and_clamps_admission(admin, doorman, event_id, wa):
+    att = party(admin, event_id, adult=3, youth=0)
+    doorman.post(f"/attendees/{att}/partial", data={"adult": "2", "youth": "0", "via": "whatsapp"})
+    base = {"name": "Party Order", "phone": "0501234500", "category": "פתוח", "email": "", "age": "", "notes": ""}
+    admin.post(f"/attendees/{att}/door-edit", data={**base, "adult_count": "5", "youth_count": "0"})      # more tickets
+    assert admitted(att)[:3] == (2, 0, True)
+    r = doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    assert "Partial 2/5" in r
+    admin.post(f"/attendees/{att}/door-edit", data={**base, "adult_count": "1", "youth_count": "0"})      # fewer than admitted
+    assert admitted(att)[:3] == (1, 0, True) and "Admitted" in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+
+
+def test_delete_event_button_is_rendered_for_admins_only(admin, doorman, event_id):
+    page = admin.get("/events").text
+    assert f'action="/events/{event_id}/delete"' in page and "Delete</button>" in page
+    assert "Danger zone" in admin.get(f"/events/{event_id}/manage").text
+    assert "/delete" not in doorman.get("/events").text
+    assert TestClient(app).get("/healthz").json()["version"]
+
+
+def test_migration_adds_partial_entry_columns(tmp_path):
+    from sqlalchemy import create_engine, text
+    from app.database import migrate
+    eng = create_engine(f"sqlite:///{tmp_path}/old3.db")
+    with eng.begin() as c:
+        c.execute(text("CREATE TABLE attendees (id INTEGER PRIMARY KEY, event_id INTEGER, name TEXT, phone TEXT, ticket_type TEXT NOT NULL, "
+                       "ticket_count INTEGER NOT NULL, adult_count INTEGER NOT NULL DEFAULT 0, youth_count INTEGER NOT NULL DEFAULT 0, "
+                       "category VARCHAR(32) NOT NULL DEFAULT 'פתוח', checked_in BOOLEAN)"))
+        c.execute(text("CREATE TABLE tickets (id INTEGER PRIMARY KEY, event_id INTEGER, attendee_id INTEGER, page_number INTEGER, file_path TEXT, claim_token TEXT)"))
+        c.execute(text("CREATE TABLE sent_messages (id INTEGER PRIMARY KEY, event_id INTEGER, attendee_id INTEGER, remote_jid TEXT, message_id TEXT, "
+                       "sent_at DATETIME, status TEXT, attempts INTEGER, delete_at DATETIME, deleted_at DATETIME)"))
+        c.execute(text("INSERT INTO attendees VALUES (1,1,'In','9721','S',3,2,1,'פתוח',1), (2,1,'Out','9722','S',2,2,0,'פתוח',0)"))
+    migrate(eng)
+    migrate(eng)
+    with eng.begin() as c:
+        rows = c.execute(text("SELECT name, admitted_adult, admitted_youth FROM attendees ORDER BY id")).all()
+        c.execute(text("SELECT delivered_at FROM tickets")); c.execute(text("SELECT ticket_id FROM sent_messages"))
+    assert [tuple(r) for r in rows] == [("In", 2, 1), ("Out", 0, 0)]

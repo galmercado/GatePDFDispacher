@@ -50,6 +50,13 @@ def get_db() -> Iterator[Session]:
 def migrate(bind: Engine) -> None:
     """Add columns introduced after the first release to pre-existing databases (SQLite)."""
     insp = inspect(bind)
+    names = insp.get_table_names()
+    if "tickets" in names and "delivered_at" not in {c["name"] for c in insp.get_columns("tickets")}:
+        with bind.begin() as conn:
+            conn.execute(text("ALTER TABLE tickets ADD COLUMN delivered_at DATETIME"))
+    if "sent_messages" in names and "ticket_id" not in {c["name"] for c in insp.get_columns("sent_messages")}:
+        with bind.begin() as conn:
+            conn.execute(text("ALTER TABLE sent_messages ADD COLUMN ticket_id INTEGER"))
     if "sent_messages" in insp.get_table_names():
         if "delete_at" not in {c["name"] for c in insp.get_columns("sent_messages")}:
             with bind.begin() as conn:
@@ -68,6 +75,7 @@ def migrate(bind: Engine) -> None:
                 counts_added = True
         if counts_added:  # every pre-existing ticket counts as an adult ticket
             conn.execute(text("UPDATE attendees SET adult_count = ticket_count"))
+    _migrate_admission(bind)
 
 
 def init_db() -> None:
@@ -75,3 +83,18 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     migrate(engine)
+
+
+def _migrate_admission(bind: Engine) -> None:
+    """Partial entry: remember how many adult/youth tickets were let in. Already admitted guests count in full."""
+    insp = inspect(bind)
+    if "attendees" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("attendees")}
+    if "admitted_adult" in cols:
+        return
+    with bind.begin() as conn:
+        conn.execute(text("ALTER TABLE attendees ADD COLUMN admitted_adult INTEGER NOT NULL DEFAULT 0"))
+        conn.execute(text("ALTER TABLE attendees ADD COLUMN admitted_youth INTEGER NOT NULL DEFAULT 0"))
+        conn.execute(text("UPDATE attendees SET admitted_adult = adult_count, admitted_youth = youth_count "
+                          "WHERE checked_in = 1"))

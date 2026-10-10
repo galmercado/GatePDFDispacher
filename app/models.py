@@ -65,6 +65,8 @@ class Attendee(Base):
     youth_count: Mapped[int] = mapped_column(Integer, default=0)   # נוער tickets
     ticket_count: Mapped[int] = mapped_column(Integer, default=1)  # always adult_count + youth_count
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    admitted_adult: Mapped[int] = mapped_column(Integer, default=0)   # tickets let in so far (partial entry)
+    admitted_youth: Mapped[int] = mapped_column(Integer, default=0)
     checked_in: Mapped[bool] = mapped_column(Boolean, default=False)
     checked_in_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -72,6 +74,30 @@ class Attendee(Base):
     tickets: Mapped[list["Ticket"]] = relationship(
         back_populates="attendee", cascade="all, delete-orphan", order_by="Ticket.page_number"
     )
+
+    @property
+    def admitted_total(self) -> int:
+        return (self.admitted_adult or 0) + (self.admitted_youth or 0)
+
+    @property
+    def remaining_adult(self) -> int:
+        return max(0, self.adult_count - (self.admitted_adult or 0))
+
+    @property
+    def remaining_youth(self) -> int:
+        return max(0, self.youth_count - (self.admitted_youth or 0))
+
+    @property
+    def remaining_total(self) -> int:
+        return self.remaining_adult + self.remaining_youth
+
+    @property
+    def fully_admitted(self) -> bool:
+        return self.ticket_count > 0 and self.admitted_total >= self.ticket_count
+
+    @property
+    def partially_admitted(self) -> bool:
+        return 0 < self.admitted_total < self.ticket_count
 
 
 class Ticket(Base):
@@ -85,6 +111,7 @@ class Ticket(Base):
     )
     page_number: Mapped[int] = mapped_column(Integer)
     file_path: Mapped[str] = mapped_column(String(512))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # sent via WhatsApp / shown as QR
     claim_token: Mapped[str] = mapped_column(
         String(64), unique=True, index=True, default=lambda: uuid.uuid4().hex
     )
@@ -114,6 +141,7 @@ class SentMessage(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
     attendee_id: Mapped[int] = mapped_column(ForeignKey("attendees.id", ondelete="CASCADE"), index=True)
+    ticket_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     remote_jid: Mapped[str] = mapped_column(String(64))
     message_id: Mapped[str] = mapped_column(String(128))
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

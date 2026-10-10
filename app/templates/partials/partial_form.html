@@ -1,0 +1,40 @@
+<div class="mb-3 flex items-start justify-between gap-3">
+  <div class="min-w-0">
+    <h2 class="truncate text-lg font-semibold text-white">Partial send</h2>
+    <p class="truncate text-sm text-slate-400">{{ attendee.name }}</p>
+  </div>
+  <button type="button" onclick="document.getElementById('qr-modal').close()" class="text-slate-400 hover:text-white" aria-label="Close"><i class="ph ph-x text-xl"></i></button>
+</div>
+<div class="mb-3 rounded-xl bg-slate-950 p-3 text-sm text-slate-300" dir="rtl">
+  הזמנה: מבוגר {{ attendee.adult_count }} · נוער {{ attendee.youth_count }}<br>
+  כבר נכנסו: <b>{{ attendee.admitted_total }}</b> · נשארו: <b class="text-amber-300">{{ attendee.remaining_total }}</b>
+</div>
+{% if errors %}<div class="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">
+  <ul class="list-inside list-disc">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+<form hx-post="/attendees/{{ attendee.id }}/partial" hx-target="#qr-content" hx-swap="innerHTML">
+  <p class="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">How many tickets to send now?</p>
+  <div class="mb-4 grid grid-cols-2 gap-3">
+    {% for key, label, left, val in [('adult', 'מבוגר (adult)', attendee.remaining_adult, adult), ('youth', 'נוער (youth)', attendee.remaining_youth, youth)] %}
+    <div class="{{ 'opacity-40' if not left }}">
+      <label class="mb-1 block text-center text-xs text-slate-400" dir="rtl">{{ label }} · עד {{ left }}</label>
+      <div class="flex items-stretch overflow-hidden rounded-xl border border-slate-700">
+        <button type="button" class="w-11 bg-slate-800 text-xl text-white hover:bg-slate-700" {{ 'disabled' if not left }}
+                onclick="const i=this.nextElementSibling; i.value=Math.max(0,+i.value-1)">−</button>
+        <input name="{{ key }}" type="number" inputmode="numeric" min="0" max="{{ left }}" value="{{ val }}" {{ 'readonly' if not left }}
+               class="w-full min-w-0 bg-slate-950 py-3 text-center text-xl font-semibold text-white outline-none">
+        <button type="button" class="w-11 bg-slate-800 text-xl text-white hover:bg-slate-700" {{ 'disabled' if not left }}
+                onclick="const i=this.previousElementSibling; i.value=Math.min({{ left }},+i.value+1)">+</button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  <button type="button" class="mb-4 w-full text-center text-xs text-brand-400 underline"
+          onclick="const f=this.closest('form'); f.adult.value={{ attendee.remaining_adult }}; f.youth.value={{ attendee.remaining_youth }}">Select all remaining ({{ attendee.remaining_total }})</button>
+  <div class="grid grid-cols-2 gap-2">
+    <button name="via" value="whatsapp" class="flex h-14 items-center justify-center gap-2 rounded-xl bg-green-500 font-bold text-green-950 hover:bg-green-400">
+      <i class="ph-fill ph-whatsapp-logo text-2xl"></i> WhatsApp</button>
+    <button name="via" value="qr" class="flex h-14 items-center justify-center gap-2 rounded-xl bg-brand-500 font-bold text-white hover:bg-brand-400">
+      <i class="ph-bold ph-qr-code text-2xl"></i> QR</button>
+  </div>
+  <p class="mt-3 text-center text-xs text-slate-500">The tickets sent now are admitted. Later you can send the rest or another partial amount.</p>
+</form>

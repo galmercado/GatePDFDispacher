@@ -21,7 +21,7 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, data, google_auth
+from . import __version__, config, data, google_auth
 from .auth import (
     authenticate, clear_auth_cookie, create_access_token, get_current_user, hash_password,
     require_admin, require_staff, set_auth_cookie, verify_password,
@@ -49,6 +49,7 @@ def format_age(value) -> str:
 
 
 templates.env.filters["age"] = format_age
+templates.env.globals["app_version"] = __version__
 
 
 def seed_admin() -> None:
@@ -217,9 +218,9 @@ def compute_stats(db: Session, event_id: int) -> dict:
     rows = db.query(
         Attendee.category, func.count(Attendee.id),
         func.count(Attendee.id).filter(Attendee.checked_in.is_(True)),
-        paid(Attendee.ticket_count), paid(Attendee.ticket_count, True),
-        paid(Attendee.adult_count), paid(Attendee.adult_count, True),
-        paid(Attendee.youth_count), paid(Attendee.youth_count, True),
+        paid(Attendee.ticket_count), func.coalesce(func.sum(Attendee.admitted_adult + Attendee.admitted_youth), 0),
+        paid(Attendee.adult_count), func.coalesce(func.sum(Attendee.admitted_adult), 0),
+        paid(Attendee.youth_count), func.coalesce(func.sum(Attendee.admitted_youth), 0),
     ).filter(Attendee.event_id == event_id).group_by(Attendee.category).all()
     keys = ("guests", "guests_in", "total", "admitted", "adult_total", "adult_in", "youth_total", "youth_in")
     by_cat = {r[0]: dict(zip(keys, r[1:])) for r in rows}
@@ -243,12 +244,46 @@ def toast(message: str, kind: str = "success") -> dict:
     return {"toast": {"message": message, "kind": kind}}
 
 
-def mark_admitted(db: Session, attendee: Attendee) -> None:
-    """Idempotent: sending a ticket or showing its QR admits the guest (never un-admits)."""
-    if not attendee.checked_in:
+def set_admission(attendee: Attendee, adult: int, youth: int) -> None:
+    """Record how many adult/youth tickets have been let in (clamped to the order) and keep checked_in in sync."""
+    attendee.admitted_adult = max(0, min(int(adult), attendee.adult_count))
+    attendee.admitted_youth = max(0, min(int(youth), attendee.youth_count))
+    if attendee.admitted_total > 0:
         attendee.checked_in = True
-        attendee.checked_in_at = utcnow()
-        db.commit()
+        attendee.checked_in_at = attendee.checked_in_at or utcnow()
+    else:
+        attendee.checked_in = False
+        attendee.checked_in_at = None
+
+
+def admit_all(db: Session, attendee: Attendee) -> None:
+    """Idempotent: let in every remaining ticket of the order."""
+    set_admission(attendee, attendee.adult_count, attendee.youth_count)
+    db.commit()
+
+
+mark_admitted = admit_all
+
+
+def reset_admission(db: Session, attendee: Attendee) -> None:
+    set_admission(attendee, 0, 0)
+    for ticket in attendee.tickets:
+        ticket.delivered_at = None
+    db.commit()
+
+
+def full_targets(attendee: Attendee) -> list[Ticket]:
+    """Tickets the main WhatsApp/QR buttons hand out: the rest, if some were already given out
+    (after a partial send); otherwise all of them (a plain resend)."""
+    delivered = [t for t in attendee.tickets if t.delivered_at]
+    undelivered = [t for t in attendee.tickets if not t.delivered_at]
+    return undelivered if (delivered and undelivered) else list(attendee.tickets)
+
+
+def split_counts(k: int, adult: int, youth: int) -> tuple[int, int]:
+    """k tickets were actually handed over out of (adult + youth) requested: adults first."""
+    a = min(adult, k)
+    return a, min(youth, k - a)
 
 
 def like_escape(text: str) -> str:
@@ -297,7 +332,7 @@ def root():
 
 @app.get("/healthz", include_in_schema=False)
 def healthz():
-    return {"status": "ok"}
+    return {"status": "ok", "version": __version__}
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -624,6 +659,22 @@ def guest_outcome(db: Session, attendee: Attendee, verb: str) -> dict:
                          "Upload more ticket pages below and they will be assigned automatically."]}
 
 
+def update_attendee(db: Session, attendee: Attendee, event: Event, **fields) -> list[str]:
+    """Validate and apply a guest edit (name, phone, category, ticket counts ...). Admission is kept but clamped to the
+    new ticket counts, and ticket PDFs are re-balanced. Returns error messages (empty on success)."""
+    item, errors = validate_attendee_form(**fields)
+    if item and is_duplicate(db, event.id, item, exclude_id=attendee.id):
+        errors = [f"Another guest named {item.name} already has {item.phone}."]
+    if errors:
+        return errors
+    for key, value in item.model_dump().items():
+        setattr(attendee, key, value)
+    set_admission(attendee, attendee.admitted_adult, attendee.admitted_youth)
+    db.commit()
+    rebalance_tickets(db, event.id)
+    return []
+
+
 @app.post("/events/{event_id}/attendees", response_class=HTMLResponse)
 def add_attendee(
     event_id: int, request: Request,
@@ -656,17 +707,11 @@ def edit_attendee(
 ):
     attendee = get_attendee_or_404(db, attendee_id)
     event = get_event_or_404(db, attendee.event_id)
-    item, errors = validate_attendee_form(name=name, phone=phone, email=email, age=age, category=category,
-                                          adult_count=adult_count, youth_count=youth_count, notes=notes)
-    if item and is_duplicate(db, event.id, item, exclude_id=attendee.id):
-        errors = [f"Another guest named {item.name} already has {item.phone}."]
+    errors = update_attendee(db, attendee, event, name=name, phone=phone, email=email, age=age, category=category,
+                             adult_count=adult_count, youth_count=youth_count, notes=notes)
     if errors:
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=[f"{attendee.name}: {e}" for e in errors]), status=422)
-    for key, value in item.model_dump().items():
-        setattr(attendee, key, value)
-    db.commit()
-    rebalance_tickets(db, event.id)
     return render(request, "manage.html", manage_ctx(db, user, event, **guest_outcome(db, attendee, "Updated")))
 
 
@@ -760,20 +805,71 @@ def unadmit_toast(deleted: int, failed: int) -> dict:
     return toast("Un-admitted: the QR link was disabled.")
 
 
+def mark_delivered(db: Session, tickets: list[Ticket]) -> None:
+    for ticket in tickets:
+        ticket.delivered_at = utcnow()
+    db.commit()
+
+
+async def send_tickets(db: Session, attendee: Attendee, event: Event, tickets: list[Ticket]) -> list[Ticket]:
+    """Send these tickets over WhatsApp one by one; returns the ones that went out (stops at the first failure,
+    raising WhatsAppError only if nothing was sent)."""
+    sent: list[Ticket] = []
+    try:
+        for ticket in tickets:
+            ref = await send_whatsapp_pdf(
+                attendee.phone, ticket.file_path,
+                caption=f"Hi {attendee.name.split()[0]}, here is your ticket for {event.name}.",
+                file_name=f"ticket-{ticket.page_number}.pdf",
+            )
+            if ref:  # remember it: deleted on un-admit, or at a random time after the event
+                db.add(SentMessage(event_id=event.id, attendee_id=attendee.id, ticket_id=ticket.id,
+                                   remote_jid=ref.remote_jid, message_id=ref.message_id,
+                                   delete_at=schedule_delete_at(event)))
+            ticket.delivered_at = utcnow()
+            db.commit()
+            sent.append(ticket)
+    except WhatsAppError:
+        if not sent:
+            raise
+        log.warning("WhatsApp send for attendee %s stopped after %s of %s ticket(s)", attendee.id, len(sent), len(tickets))
+    return sent
+
+
+def qr_codes(request: Request, tickets: list[Ticket]) -> tuple[list[dict], bool]:
+    base = public_base_url(request)
+    codes = []
+    for ticket in tickets:
+        url = f"{base}/tickets/claim/{ticket.claim_token}/ticket.pdf"
+        qr = segno.make(url, error="m")
+        codes.append({"page": ticket.page_number, "url": url,
+                      "svg": qr.svg_data_uri(scale=8, border=2, dark="#0f172a", light="#ffffff")})
+    return codes, is_loopback(base)
+
+
+def oob_card(request: Request, attendee: Attendee, trigger: dict, close_modal: bool = True) -> HTMLResponse:
+    """Response for actions made inside the popup: refresh the card behind it, show a toast, close the popup."""
+    headers = {"HX-Trigger": json.dumps({"refreshStats": "", **trigger})}
+    if close_modal:
+        headers["HX-Trigger-After-Swap"] = json.dumps({"closeModal": ""})
+    return render(request, "partials/attendee_rows.html", {"attendees": [attendee], "q": "x", "oob": True},
+                  headers=headers)
+
+
 @app.post("/attendees/{attendee_id}/toggle", response_class=HTMLResponse)
 async def toggle_check_in(attendee_id: int, request: Request, user: User = Depends(require_staff),
                           db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
-    attendee.checked_in = not attendee.checked_in
-    attendee.checked_in_at = utcnow() if attendee.checked_in else None
-    db.commit()
     note = None
-    if not attendee.checked_in:       # un-admitted: this order's ticket message and QR link go away
+    if attendee.checked_in:           # un-admit (also after a partial entry): this order's messages and QR links go away
+        reset_admission(db, attendee)
         rotate_claim_tokens(db, attendee)
         if config.WHATSAPP_DELETE_ON_UNADMIT:
             note = unadmit_toast(*await revoke_attendee_messages(db, attendee))
         else:
             note = unadmit_toast(0, 0)
+    else:
+        admit_all(db, attendee)
     return card_response(request, attendee, note or "refreshStats")
 
 
@@ -782,25 +878,18 @@ async def whatsapp_dispatch(attendee_id: int, request: Request,
                             user: User = Depends(require_staff), db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
     event = db.get(Event, attendee.event_id)
-    mark_admitted(db, attendee)
+    targets = full_targets(attendee)
+    admit_all(db, attendee)
     if not attendee.tickets:
         return card_response(request, attendee, toast("No ticket PDF is attached to this guest.", "error"))
     try:
-        for ticket in attendee.tickets:
-            ref = await send_whatsapp_pdf(
-                attendee.phone, ticket.file_path,
-                caption=f"Hi {attendee.name.split()[0]}, here is your ticket for {event.name}.",
-                file_name=f"ticket-{ticket.page_number}.pdf",
-            )
-            if ref:  # remember it: deleted on un-admit, or at a random time after the event
-                db.add(SentMessage(event_id=event.id, attendee_id=attendee.id,
-                                   remote_jid=ref.remote_jid, message_id=ref.message_id,
-                                   delete_at=schedule_delete_at(event)))
-                db.commit()
+        sent = await send_tickets(db, attendee, event, targets)
     except WhatsAppError as exc:
         log.warning("WhatsApp dispatch failed for attendee %s: %s", attendee.id, exc)
         return card_response(request, attendee, toast(f"WhatsApp failed: {exc}", "error"))
-    n = len(attendee.tickets)
+    n = len(sent)
+    if n < len(targets):
+        return card_response(request, attendee, toast(f"Only {n} of {len(targets)} tickets were sent - tap again to retry.", "error"))
     return card_response(request, attendee, toast(f"Sent {n} ticket{'s' if n != 1 else ''} to {attendee.name}"))
 
 
@@ -820,18 +909,116 @@ def public_base_url(request: Request) -> str:
 def qr_modal(attendee_id: int, request: Request, user: User = Depends(require_staff),
              db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
-    mark_admitted(db, attendee)
-    base = public_base_url(request)
-    unreachable = is_loopback(base)
-    codes = []
-    for ticket in attendee.tickets:
-        url = f"{base}/tickets/claim/{ticket.claim_token}/ticket.pdf"
-        qr = segno.make(url, error="m")
-        codes.append({"page": ticket.page_number, "url": url,
-                      "svg": qr.svg_data_uri(scale=8, border=2, dark="#0f172a", light="#ffffff")})
+    targets = full_targets(attendee)
+    admit_all(db, attendee)
+    mark_delivered(db, targets)
+    codes, unreachable = qr_codes(request, targets)
     return render(request, "partials/qr_modal.html",
                   {"attendee": attendee, "codes": codes, "unreachable": unreachable},
                   headers={"HX-Trigger": "refreshStats"})
+
+
+# ---- partial send: hand out only some of an order's tickets (the rest of the party arrives later)
+
+def partial_ctx(attendee: Attendee, **extra) -> dict:
+    undelivered = [t for t in attendee.tickets if not t.delivered_at]
+    return {"attendee": attendee, "errors": [], "undelivered": len(undelivered),
+            "adult": min(1, attendee.remaining_adult) if attendee.remaining_adult else 0,
+            "youth": 0 if attendee.remaining_adult else min(1, attendee.remaining_youth), **extra}
+
+
+@app.get("/attendees/{attendee_id}/partial-form", response_class=HTMLResponse)
+def partial_form(attendee_id: int, request: Request, user: User = Depends(require_staff),
+                 db: Session = Depends(get_db)):
+    attendee = get_attendee_or_404(db, attendee_id)
+    return render(request, "partials/partial_form.html", partial_ctx(attendee))
+
+
+@app.post("/attendees/{attendee_id}/partial", response_class=HTMLResponse)
+async def partial_send(
+    attendee_id: int, request: Request,
+    adult: str = Form("0"), youth: str = Form("0"), via: str = Form("whatsapp"),
+    user: User = Depends(require_staff), db: Session = Depends(get_db),
+):
+    attendee = get_attendee_or_404(db, attendee_id)
+    event = db.get(Event, attendee.event_id)
+    errors: list[str] = []
+    try:
+        a, y = int(adult or 0), int(youth or 0)
+    except ValueError:
+        a = y = 0
+        errors.append("Enter whole numbers.")
+    undelivered = [t for t in attendee.tickets if not t.delivered_at]
+    if not errors:
+        if a < 0 or y < 0 or a > attendee.remaining_adult or y > attendee.remaining_youth:
+            errors.append(f"Only {attendee.remaining_adult} adult and {attendee.remaining_youth} youth ticket(s) are left to send.")
+        elif a + y < 1:
+            errors.append("Choose at least one ticket.")
+        elif a + y > len(undelivered):
+            errors.append(f"Only {len(undelivered)} ticket PDF(s) are available for this guest - ask an admin to upload more pages.")
+        if via not in ("whatsapp", "qr"):
+            errors.append("Choose WhatsApp or QR.")
+    if errors:
+        return render(request, "partials/partial_form.html", partial_ctx(attendee, errors=errors, adult=a, youth=y))
+    targets = undelivered[: a + y]
+    first_name = attendee.name
+
+    if via == "qr":
+        mark_delivered(db, targets)
+        set_admission(attendee, attendee.admitted_adult + a, attendee.admitted_youth + y)
+        db.commit()
+        codes, unreachable = qr_codes(request, targets)
+        return render(request, "partials/qr_modal.html",
+                      {"attendee": attendee, "codes": codes, "unreachable": unreachable,
+                       "note": f"{len(targets)} of {attendee.ticket_count} tickets shown - {attendee.admitted_total} admitted so far"},
+                      headers={"HX-Trigger": "refreshStats"})
+
+    try:
+        sent = await send_tickets(db, attendee, event, targets)
+    except WhatsAppError as exc:
+        log.warning("Partial WhatsApp send failed for attendee %s: %s", attendee.id, exc)
+        return render(request, "partials/partial_form.html",
+                      partial_ctx(attendee, errors=[f"WhatsApp failed: {exc}"], adult=a, youth=y))
+    pa, py = split_counts(len(sent), a, y)
+    set_admission(attendee, attendee.admitted_adult + pa, attendee.admitted_youth + py)
+    db.commit()
+    if len(sent) < len(targets):
+        msg = toast(f"Only {len(sent)} of {len(targets)} tickets were sent to {first_name} - open Partial send to retry.", "error")
+    else:
+        left = attendee.ticket_count - attendee.admitted_total
+        msg = toast(f"Sent {len(sent)} ticket{'s' if len(sent) != 1 else ''} to {first_name}"
+                    + (f" - {left} still to come" if left else " - all tickets sent"))
+    return oob_card(request, attendee, msg)
+
+
+# ---- admin-only editing from the door page
+
+@app.get("/attendees/{attendee_id}/edit-form", response_class=HTMLResponse)
+def door_edit_form(attendee_id: int, request: Request, user: User = Depends(require_admin),
+                   db: Session = Depends(get_db)):
+    attendee = get_attendee_or_404(db, attendee_id)
+    return render(request, "partials/edit_form.html", {"attendee": attendee, "errors": [], "form": None,
+                                                       "categories": data.CATEGORIES})
+
+
+@app.post("/attendees/{attendee_id}/door-edit", response_class=HTMLResponse)
+def door_edit(
+    attendee_id: int, request: Request,
+    name: str = Form(""), phone: str = Form(""), email: str = Form(""), age: str = Form(""),
+    category: str = Form(data.DEFAULT_CATEGORY), adult_count: str = Form("1"), youth_count: str = Form("0"),
+    notes: str = Form(""),
+    user: User = Depends(require_admin), db: Session = Depends(get_db),
+):
+    attendee = get_attendee_or_404(db, attendee_id)
+    event = get_event_or_404(db, attendee.event_id)
+    form = dict(name=name, phone=phone, email=email, age=age, category=category,
+                adult_count=adult_count, youth_count=youth_count, notes=notes)
+    errors = update_attendee(db, attendee, event, **form)
+    if errors:
+        return render(request, "partials/edit_form.html", {"attendee": attendee, "errors": errors, "form": form,
+                                                           "categories": data.CATEGORIES})
+    db.refresh(attendee)
+    return oob_card(request, attendee, toast(f"Saved {attendee.name} - {attendee.ticket_count} ticket(s)"))
 
 
 def ticket_by_token(db: Session, token: str) -> Ticket:

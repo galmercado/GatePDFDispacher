@@ -2,8 +2,9 @@
   <div class="min-w-0">
     <h2 class="truncate text-lg font-semibold text-white">{{ attendee.name }}</h2>
     <p class="text-sm text-slate-400">Scanning opens the ticket PDF directly</p>
+    {% if note %}<p class="mt-0.5 text-xs text-amber-300">{{ note }}</p>{% endif %}
   </div>
-  <button onclick="document.getElementById('qr-modal').close()" class="text-slate-400 hover:text-white" aria-label="Close"><i class="ph ph-x text-xl"></i></button>
+  <button type="button" onclick="document.getElementById('qr-modal').close()" class="text-slate-400 hover:text-white" aria-label="Close"><i class="ph ph-x text-xl"></i></button>
 </div>
 {% if unreachable and codes %}
 <div class="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200" role="alert">
