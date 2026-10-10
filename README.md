@@ -8,7 +8,7 @@ Runs on Docker Compose, locally or on an Oracle Cloud Always-Free ARM VM.
 - **Events** (admin): opponent picker (`מכבי תל אביב נגד …`), arena picker (default *בית (היכל מנורה מבטחים)*), calendar date/time.
 - **Guests**: bulk import (`.xlsx` / `.json`) or add/edit/remove manually. Each guest has a **category**
   (חבר ארגון · מצטרף · פלוס · פתוח) and any mix of **מבוגר (adult)** and **נוער (youth)** tickets.
-- **Tickets**: upload a merged PDF; it is split per page and handed out automatically to guests who lack tickets. Extra pages wait in a
+- **Tickets**: upload a merged PDF (a progress bar with percent and a Cancel button shows while it uploads); it is split per page and handed out automatically to guests who lack tickets. Extra pages wait in a
   spare pool; new or edited guests get spare pages automatically, and if none are left you get a warning - upload more pages later and
   they are assigned. Removing a guest or lowering their count returns pages to the pool (with a fresh link).
 - **Door cockpit** (admin + doorman): search, guests grouped by category with live counters, admitted total for all types

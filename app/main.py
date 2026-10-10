@@ -440,7 +440,8 @@ def manage_ctx(db: Session, user: User, event: Event, **extra) -> dict:
     attendees = (db.query(Attendee).options(selectinload(Attendee.tickets))
                  .filter(Attendee.event_id == event.id).order_by(func.lower(Attendee.name), Attendee.id).all())
     return {"user": user, "event": event, "stats": compute_stats(db, event.id),
-            "issues": load_issues(db, event.id), "ticket_files": tickets, "spare_pages": status["spare"], "warnings": warnings, "attendees": attendees, "groups": group_by_category(attendees),
+            "issues": load_issues(db, event.id), "max_pdf_mb": config.MAX_PDF_BYTES // (1024 * 1024),
+            "max_list_mb": config.MAX_LIST_BYTES // (1024 * 1024), "ticket_files": tickets, "spare_pages": status["spare"], "warnings": warnings, "attendees": attendees, "groups": group_by_category(attendees),
             "categories": data.CATEGORIES, "messages": [], "errors": [], **extra}
 
 
