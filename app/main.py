@@ -1,10 +1,12 @@
 """FastAPI application: routes, templates and exception handlers."""
 import asyncio
+import io
 import json
 import shutil
 import random
 import re
 import uuid
+import zipfile
 import secrets
 from urllib.parse import urlsplit
 import logging
@@ -30,7 +32,7 @@ from .auth import (
 from . import lines as linesmod
 from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
-from .models import Attendee, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Member, Ticket, User, utcnow
+from .models import Attendee, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Member, TicketBundle, Ticket, User, utcnow
 from .messages import ticket_caption
 from .services import (
     AttendeeIn, ImportValidationError, describe_validation_error, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
@@ -118,6 +120,7 @@ def rotate_claim_tokens(db: Session, attendee: Attendee) -> None:
     """Issue new claim tokens: QR codes / links shown before stop working."""
     for ticket in attendee.tickets:
         ticket.claim_token = uuid.uuid4().hex
+    db.query(TicketBundle).filter(TicketBundle.attendee_id == attendee.id).delete()    # their ZIP links too
     db.commit()
 
 
@@ -987,15 +990,18 @@ async def send_tickets(db: Session, attendee: Attendee, event: Event, tickets: l
     return sent
 
 
-def qr_codes(request: Request, tickets: list[Ticket]) -> tuple[list[dict], bool]:
+def qr_bundle(db: Session, request: Request, attendee: Attendee, tickets: list[Ticket]) -> tuple[dict | None, bool]:
+    """ONE QR code whose link downloads a ZIP with all of the given ticket PDFs (however many there are)."""
     base = public_base_url(request)
-    codes = []
-    for ticket in tickets:
-        url = f"{base}/tickets/claim/{ticket.claim_token}/ticket.pdf"
-        qr = segno.make(url, error="m")
-        codes.append({"page": ticket.page_number, "url": url,
-                      "svg": qr.svg_data_uri(scale=8, border=2, dark="#0f172a", light="#ffffff")})
-    return codes, is_loopback(base)
+    if not tickets:
+        return None, is_loopback(base)
+    bundle = TicketBundle(attendee_id=attendee.id, ticket_ids=json.dumps([t.id for t in tickets]))
+    db.add(bundle)
+    db.commit()
+    url = f"{base}/tickets/bundle/{bundle.token}/tickets.zip"
+    qr = segno.make(url, error="m")
+    return {"url": url, "count": len(tickets), "pages": [t.page_number for t in tickets],
+            "svg": qr.svg_data_uri(scale=8, border=2, dark="#0f172a", light="#ffffff")}, is_loopback(base)
 
 
 def oob_card(request: Request, attendee: Attendee, trigger: dict, close_modal: bool = True) -> HTMLResponse:
@@ -1063,9 +1069,9 @@ def qr_modal(attendee_id: int, request: Request, user: User = Depends(require_st
     targets = full_targets(attendee)
     admit_all(db, attendee)
     mark_delivered(db, targets)
-    codes, unreachable = qr_codes(request, targets)
+    bundle, unreachable = qr_bundle(db, request, attendee, targets)
     return render(request, "partials/qr_modal.html",
-                  {"attendee": attendee, "codes": codes, "unreachable": unreachable},
+                  {"attendee": attendee, "bundle": bundle, "unreachable": unreachable},
                   headers={"HX-Trigger": "refreshStats"})
 
 
@@ -1118,9 +1124,9 @@ async def partial_send(
         mark_delivered(db, targets)
         set_admission(attendee, attendee.admitted_adult + a, attendee.admitted_youth + y)
         db.commit()
-        codes, unreachable = qr_codes(request, targets)
+        bundle, unreachable = qr_bundle(db, request, attendee, targets)
         return render(request, "partials/qr_modal.html",
-                      {"attendee": attendee, "codes": codes, "unreachable": unreachable,
+                      {"attendee": attendee, "bundle": bundle, "unreachable": unreachable,
                        "note": f"{len(targets)} of {attendee.ticket_count} tickets shown - {attendee.admitted_total} admitted so far"},
                       headers={"HX-Trigger": "refreshStats"})
 
@@ -1197,6 +1203,31 @@ def ticket_pdf_response(db: Session, token: str, disposition: str) -> FileRespon
     return FileResponse(path, media_type="application/pdf", filename=f"ticket-{ticket.page_number}.pdf",
                         content_disposition_type=disposition,
                         headers={"Cache-Control": "private, no-store"})
+
+
+@app.get("/tickets/bundle/{token}/tickets.zip")
+def download_bundle(token: str, db: Session = Depends(get_db)):
+    """What the door QR code opens: all PDFs handed out together, as one ZIP. Public, unguessable token."""
+    bundle = db.query(TicketBundle).filter(TicketBundle.token == token).first()
+    if bundle is None:
+        raise HTTPException(404, "Link not found")
+    ids = json.loads(bundle.ticket_ids)
+    tickets = {t.id: t for t in db.query(Ticket).filter(Ticket.id.in_(ids), Ticket.attendee_id == bundle.attendee_id)}
+    root = config.STORAGE_DIR.resolve()
+    buf = io.BytesIO()
+    count = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:          # PDFs are compressed already
+        for tid in ids:
+            ticket = tickets.get(tid)
+            path = Path(ticket.file_path).resolve() if ticket else None
+            if path is None or not path.is_relative_to(root) or not path.is_file():
+                continue
+            count += 1
+            zf.write(path, f"ticket-{count}.pdf")
+    if not count:
+        raise HTTPException(404, "These tickets are no longer available")
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="tickets.zip"', "Cache-Control": "private, no-store"})
 
 
 @app.get("/tickets/claim/{token}/ticket.pdf")

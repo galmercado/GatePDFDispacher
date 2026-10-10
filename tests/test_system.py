@@ -1,6 +1,7 @@
 """System tests: bulk import validation, PDF splitting and RBAC isolation."""
 import io
 import json
+import re
 import os
 import tempfile
 from pathlib import Path
@@ -380,7 +381,7 @@ def test_doorman_cockpit_search_toggle_stats_qr(admin, doorman, event_id):
     assert 'id="stat-admitted">0<' in doorman.get(f"/events/{event_id}/stats").text
 
     qr = doorman.post(f"/attendees/{ada}/qr")
-    assert qr.text.count("data:image/svg+xml") == 2
+    assert qr.text.count("data:image/svg+xml") == 1 and "2 tickets in one ZIP" in qr.text      # one QR, whatever the ticket count
     with SessionLocal() as db:
         token = db.get(Attendee, ada).tickets[0].claim_token
     assert token  # claim URL is embedded in the QR payload, not rendered as text
@@ -581,11 +582,11 @@ def test_qr_uses_reachable_base_url(admin, doorman, event_id, monkeypatch):
     ada = seeded_event(admin, event_id)
     monkeypatch.setattr(config, "PUBLIC_BASE_URL", "http://localhost:8000")
     r = doorman.post(f"/attendees/{ada}/qr", headers={"host": "192.168.1.20:8000"})
-    assert "http://192.168.1.20:8000/tickets/claim/" in r.text and "/ticket.pdf" in r.text and "can't open" not in r.text
+    assert "http://192.168.1.20:8000/tickets/bundle/" in r.text and "/tickets.zip" in r.text and "can't open" not in r.text
     r = doorman.post(f"/attendees/{ada}/qr", headers={"host": "localhost:8000"})
     assert "can&#39;t open" in r.text or "can't open" in r.text
     monkeypatch.setattr(config, "PUBLIC_BASE_URL", "https://tickets.example.org")
-    assert "https://tickets.example.org/tickets/claim/" in doorman.post(f"/attendees/{ada}/qr").text
+    assert "https://tickets.example.org/tickets/bundle/" in doorman.post(f"/attendees/{ada}/qr").text
 
 
 def test_gateway_error_details_are_surfaced(tmp_path):
@@ -894,6 +895,8 @@ def test_unadmit_deletes_that_orders_message_and_disables_its_qr_link(admin, doo
     doorman.post(f"/attendees/{ada}/whatsapp")                 # admits + sends MSG1, MSG2
     old = ticket_tokens(ada)
     assert TestClient(app).get(f"/tickets/claim/{old[0]}/ticket.pdf").status_code == 200
+    zip_url = re.search(r"(/tickets/bundle/\w+/tickets\.zip)", doorman.post(f"/attendees/{ada}/qr").text).group(1)
+    assert TestClient(app).get(zip_url).status_code == 200                      # the door QR's ZIP works while admitted
     r = toggle(doorman, ada)                                   # un-admit
     assert "Waiting" in r.text and "deleted from WhatsApp" in r.headers["HX-Trigger"]
     assert wa["deleted"] == ["MSG1", "MSG2"]
@@ -904,8 +907,10 @@ def test_unadmit_deletes_that_orders_message_and_disables_its_qr_link(admin, doo
         assert anon.get(f"/tickets/claim/{token}").status_code == 404
     new = ticket_tokens(ada)
     assert not set(new) & set(old)
+    assert anon.get(zip_url).status_code == 404                                 # ... and its link dies with the un-admit
     qr = doorman.post(f"/attendees/{ada}/qr")                  # a fresh QR works again
-    assert new[0] in qr.text and anon.get(f"/tickets/claim/{new[0]}/ticket.pdf").status_code == 200
+    fresh = re.search(r"(/tickets/bundle/\w+/tickets\.zip)", qr.text).group(1)
+    assert fresh != zip_url and anon.get(fresh).status_code == 200
     assert toggle(doorman, ada).status_code == 200             # admitting afterwards deletes nothing more
     assert wa["deleted"] == ["MSG1", "MSG2"]
 
@@ -1941,3 +1946,43 @@ def test_registration_section_offers_popup_and_paste(admin, event_id):
     page = admin.get(f"/events/{event_id}/manage").text
     assert 'id="open-reg"' in page and 'data-url="https://gate11.co.il/admin/page.php?id=ticketReservations&amp;gameId=377"' in page
     assert 'id="paste-zone"' in page and "clipboardData.getData('text/html')" in page and "Send to Gate" in page
+
+
+def test_door_qr_is_one_zip_with_all_the_tickets(admin, doorman, event_id):
+    import zipfile as zf
+    att = party(admin, event_id, adult=2, youth=1)                         # 3 tickets
+    qr = doorman.post(f"/attendees/{att}/qr")
+    assert qr.text.count("data:image/svg+xml") == 1 and "3 tickets in one ZIP" in qr.text
+    url = re.search(r"http://testserver(/tickets/bundle/\w+/tickets\.zip)", qr.text).group(1)
+    r = TestClient(app).get(url)                                           # public, like the QR scan
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip" and "attachment" in r.headers["content-disposition"]
+    with zf.ZipFile(io.BytesIO(r.content)) as z:
+        assert z.namelist() == ["ticket-1.pdf", "ticket-2.pdf", "ticket-3.pdf"]
+        assert all(len(PdfReader(io.BytesIO(z.read(n))).pages) == 1 for n in z.namelist())
+    assert TestClient(app).get("/tickets/bundle/" + "0" * 32 + "/tickets.zip").status_code == 404
+
+
+def test_even_a_single_ticket_comes_as_a_zip_and_partial_zips_only_the_chosen(admin, doorman, event_id):
+    import zipfile as zf
+    one = party(admin, event_id, adult=1, youth=0)
+    url = re.search(r"(/tickets/bundle/\w+/tickets\.zip)", doorman.post(f"/attendees/{one}/qr").text).group(1)
+    with zf.ZipFile(io.BytesIO(TestClient(app).get(url).content)) as z:
+        assert z.namelist() == ["ticket-1.pdf"]
+    with SessionLocal() as db:
+        db.query(Attendee).filter_by(id=one).delete()
+        db.commit()
+    att = party(admin, event_id, adult=3, youth=0)
+    r = doorman.post(f"/attendees/{att}/partial", data={"adult": "2", "youth": "0", "via": "qr"})
+    assert "2 tickets in one ZIP" in r.text and r.text.count("data:image/svg+xml") == 1
+    first = re.search(r"(/tickets/bundle/\w+/tickets\.zip)", r.text).group(1)
+    rest = re.search(r"(/tickets/bundle/\w+/tickets\.zip)", doorman.post(f"/attendees/{att}/qr").text).group(1)   # the rest
+    assert first != rest
+    with zf.ZipFile(io.BytesIO(TestClient(app).get(rest).content)) as z:
+        assert len(z.namelist()) == 1
+
+
+def test_bundle_link_survives_ticket_reassignment_safely(admin, doorman, event_id):
+    att = party(admin, event_id, adult=2, youth=0)
+    url = re.search(r"(/tickets/bundle/\w+/tickets\.zip)", doorman.post(f"/attendees/{att}/qr").text).group(1)
+    admin.post(f"/attendees/{att}/delete")                                  # guest removed: link must stop working
+    assert TestClient(app).get(url).status_code == 404

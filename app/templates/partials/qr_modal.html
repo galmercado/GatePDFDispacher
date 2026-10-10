@@ -1,27 +1,27 @@
 <div class="mb-3 flex items-start justify-between gap-3">
   <div class="min-w-0">
     <h2 class="truncate text-lg font-semibold text-white">{{ attendee.name }}</h2>
-    <p class="text-sm text-slate-400">Scanning opens the ticket PDF directly</p>
+    <p class="text-sm text-slate-400">One scan downloads all the tickets (ZIP)</p>
     {% if note %}<p class="mt-0.5 text-xs text-amber-300">{{ note }}</p>{% endif %}
   </div>
   <button type="button" onclick="document.getElementById('qr-modal').close()" class="text-slate-400 hover:text-white" aria-label="Close"><i class="ph ph-x text-xl"></i></button>
 </div>
-{% if unreachable and codes %}
+{% if unreachable and bundle %}
 <div class="mb-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200" role="alert">
   <i class="ph-fill ph-warning"></i> This QR points to <b>localhost</b>, which other phones can't open.
   Open this page from the server's LAN address (e.g. http://192.168.x.x:8000) or set <code>PUBLIC_BASE_URL</code>.
 </div>
 {% endif %}
-{% for c in codes %}
+{% if bundle %}
 <div class="mb-3 rounded-2xl bg-white p-3 text-center">
-  <img src="{{ c.svg }}" alt="QR code for ticket {{ c.page }}" class="mx-auto w-full max-w-[260px]">
-  <p class="mt-1 text-xs font-medium text-slate-600">Ticket {{ loop.index }} of {{ codes|length }}</p>
-  <a href="{{ c.url }}" target="_blank" rel="noopener" class="mt-2 inline-flex items-center gap-1 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white"><i class="ph ph-file-pdf"></i> Open PDF</a>
-  <p class="mt-1 break-all text-[11px] text-slate-500">{{ c.url }}</p>
+  <img src="{{ bundle.svg }}" alt="QR code for the ticket ZIP" class="mx-auto w-full max-w-[260px]">
+  <p class="mt-1 text-sm font-semibold text-slate-800"><i class="ph ph-file-zip"></i> {{ bundle.count }} ticket{{ 's' if bundle.count != 1 }} in one ZIP</p>
+  <a href="{{ bundle.url }}" target="_blank" rel="noopener" class="mt-2 inline-flex items-center gap-1 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white"><i class="ph ph-download-simple"></i> Download ZIP</a>
+  <p class="mt-1 break-all text-[11px] text-slate-500">{{ bundle.url }}</p>
 </div>
 {% else %}
 <div class="rounded-xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
   <i class="ph ph-file-x text-3xl"></i><p class="mt-1">No ticket PDF attached yet.</p></div>
-{% endfor %}
+{% endif %}
 {# also refresh the guest's card behind the modal (now Admitted) #}
 {% with attendees=[attendee], oob=True, q="x" %}{% include "partials/attendee_rows.html" %}{% endwith %}

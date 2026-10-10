@@ -228,3 +228,16 @@ class Member(Base):
     phone: Mapped[str] = mapped_column(String(32))
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TicketBundle(Base):
+    """One link (one QR code) that downloads a ZIP of several of an order's ticket PDFs. Dies with a new
+    claim-token rotation (un-admit) or when the guest is removed."""
+
+    __tablename__ = "ticket_bundles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True, default=lambda: uuid.uuid4().hex)
+    attendee_id: Mapped[int] = mapped_column(ForeignKey("attendees.id", ondelete="CASCADE"), index=True)
+    ticket_ids: Mapped[str] = mapped_column(Text)            # JSON list
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
