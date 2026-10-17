@@ -75,6 +75,9 @@ def migrate(bind: Engine) -> None:
                 conn.execute(text("ALTER TABLE whatsapp_lines ADD COLUMN profile_set BOOLEAN NOT NULL DEFAULT 0"))
             if "profile_error" not in line_cols:
                 conn.execute(text("ALTER TABLE whatsapp_lines ADD COLUMN profile_error TEXT"))
+    if "events" in names and "tickets_purged_at" not in {c["name"] for c in insp.get_columns("events")}:
+        with bind.begin() as conn:
+            conn.execute(text("ALTER TABLE events ADD COLUMN tickets_purged_at DATETIME"))
     if "events" in names and "external_id" not in {c["name"] for c in insp.get_columns("events")}:
         with bind.begin() as conn:
             conn.execute(text("ALTER TABLE events ADD COLUMN external_id VARCHAR(32)"))

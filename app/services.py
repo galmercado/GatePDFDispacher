@@ -20,7 +20,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
 from . import config, data
-from .models import Attendee, SpareTicket, Ticket
+from .pdfs import compress_writer
+from .models import Attendee, Event, SpareTicket, Ticket
 
 log = logging.getLogger("gate.whatsapp")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -491,6 +492,11 @@ def split_pdf(content: bytes, event_id: int, start: int = 1) -> list[Path]:
     for index, page in enumerate(reader.pages, start=start):
         writer = PdfWriter()
         writer.add_page(page)
+        if config.PDF_COMPRESS:
+            try:
+                compress_writer(writer)
+            except Exception:           # never lose a ticket over an optimisation
+                log.exception("Could not compress ticket page %s", index)
         path = out_dir / f"ticket_{index:04d}.pdf"
         with open(path, "wb") as fh:
             writer.write(fh)
@@ -589,6 +595,7 @@ def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = F
             SpareTicket.event_id == event_id).scalar(),
     )
     paths = split_pdf(content, event_id, start=last + 1)
+    db.query(Event).filter(Event.id == event_id).update({Event.tickets_purged_at: None})
     for offset, path in enumerate(paths, start=1):
         db.add(SpareTicket(event_id=event_id, page_number=last + offset, file_path=str(path)))
     db.commit()

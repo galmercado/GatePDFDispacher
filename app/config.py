@@ -74,6 +74,14 @@ WHATSAPP_CLEANUP_STARTUP_DELAY = 60.0
 WHATSAPP_DELETE_GIVE_UP_HOURS = 47.0
 
 MAX_PDF_BYTES = 200 * 1024 * 1024
+# Ticket PDFs are made smaller when they are split (images re-encoded, content deflated); QR codes stay lossless.
+PDF_COMPRESS = _bool("PDF_COMPRESS", True)
+PDF_IMAGE_MAX_PX = int(os.getenv("PDF_IMAGE_MAX_PX", "1600"))      # larger images are scaled down to this many pixels
+PDF_JPEG_QUALITY = int(os.getenv("PDF_JPEG_QUALITY", "80"))        # for photo-like images only
+# Ticket PDFs are deleted this many days after the event (0 = keep them).
+TICKET_RETENTION_DAYS = int(os.getenv("TICKET_RETENTION_DAYS", "30"))
+# Key for POST /api/tickets (automatic upload from another service). Empty = the API is switched off.
+TICKETS_API_KEY = os.getenv("TICKETS_API_KEY", "").strip()
 MAX_LIST_BYTES = 5 * 1024 * 1024
 
 # External registration system whose admin page lists the reservations of a game (scraped on demand).

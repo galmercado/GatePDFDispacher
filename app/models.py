@@ -42,6 +42,7 @@ class Event(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     lines_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # pre-event WhatsApp line test done
     external_id: Mapped[str | None] = mapped_column(String(32), nullable=True)         # id of this game in the registration system
+    tickets_purged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # ticket PDFs deleted after the retention period
 
     attendees: Mapped[list["Attendee"]] = relationship(
         back_populates="event", cascade="all, delete-orphan"

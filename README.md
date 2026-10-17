@@ -108,6 +108,39 @@ the event can no longer be deleted afterwards. Evolution API does not expose Wha
 one-to-one chats, which is why the app does the deleting itself. Guests see "This message was deleted". Only messages sent after
 this feature was deployed can be deleted.
 
+## Ticket files: Google Drive, automatic upload API, compression, retention
+
+**Google Drive.** On an event's Manage page, under *Upload ticket PDF*, paste one or more Drive share links (one per line).
+The file must be shared as *Anyone with the link* and be a PDF; a folder link is refused. The app downloads it and adds it
+to the ticket pool exactly like an uploaded file.
+
+**Automatic upload API** (for another service). Set `TICKETS_API_KEY` in `.env` (e.g. `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`)
+and restart. Without a key the API is off (HTTP 503).
+
+```bash
+curl -X POST https://gatetickets.duckdns.org/api/tickets \
+  -H "X-API-Key: $TICKETS_API_KEY" \
+  -F "file=@tickets.pdf" \
+  -F 'header=קיבלת כרטיסים למכבי ראפיד ת"א - עירוני קריית אתא - לא מסומן'
+```
+
+* `header` gives the opponent (the team that is not Maccabi Tel Aviv; spellings such as `ת"א`, `קרית`/`קריית` are matched
+  against the opponents list). Instead of `file` you can send `url` (a Drive link). `Authorization: Bearer <key>` works too.
+* The **date, time and venue** are read from the first page of the PDF (dd/mm/yyyy, dd.mm.yy, yyyy-mm-dd or "17 באוקטובר 2026";
+  venue = any name from the venues list). The game is matched by opponent and day; if it does not exist it is **created**
+  (venue defaults to the home arena when none is found). If the PDF has no readable date, the nearest upcoming game
+  against that opponent is used, otherwise the call fails with 422.
+* Pages are added to the pool and handed to guests like any upload. Sending the same file again changes nothing
+  (`"duplicate": true`). The answer is JSON: `event_id`, `event`, `date`, `location`, `created_event`, `pages`, `assigned`, `spare`, `missing`.
+
+**Compression.** Every ticket page is shrunk when the PDF is split (Settings → *Compress ticket PDFs*): page data is
+deflated, duplicate objects removed, huge images scaled to at most `PDF_IMAGE_MAX_PX` (1600) pixels. Flat images such
+as QR codes and barcodes are stored **losslessly**; only photo-like images are JPEG-compressed (`PDF_JPEG_QUALITY`, 80).
+A re-encoded image is used only if it is really smaller. Tests decode the QR code from the compressed pages.
+
+**Retention.** Ticket PDFs are deleted `TICKET_RETENTION_DAYS` (default 30) after the event ends, checked every 10 minutes
+(Settings → Cleanup; 0 keeps them). Guests and attendance stay; the tickets lose their file, so old download links stop working.
+
 ## Site settings (admin)
 
 The **Settings** page (sliders icon) edits the main constants without touching files: the **ticket message wording** (greetings, main sentence, ticket counter, date line,

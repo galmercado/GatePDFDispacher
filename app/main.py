@@ -1,5 +1,6 @@
 """FastAPI application: routes, templates and exception handlers."""
 import asyncio
+import hashlib
 import io
 import json
 import shutil
@@ -32,8 +33,9 @@ from .auth import (
 from . import lines as linesmod
 from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
-from .models import Attendee, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Member, TicketBundle, Ticket, User, utcnow
+from .models import AppSetting, Attendee, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Member, TicketBundle, Ticket, User, utcnow
 from .messages import ticket_caption
+from .pdfs import DriveError, fetch_drive_pdf, parse_ticket_header, read_ticket_meta
 from .services import (
     AttendeeIn, ImportValidationError, describe_validation_error, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
     import_attendees,
@@ -167,9 +169,40 @@ async def cleanup_due_messages(now: datetime | None = None) -> int:
     return deleted
 
 
+def purge_old_tickets(now: datetime | None = None) -> int:
+    """Delete the ticket PDF files of events that ended TICKET_RETENTION_DAYS ago. The guest list and attendance
+    stay; tickets keep their rows (so history such as 'sent' remains) but lose file and download links.
+    Returns the number of events purged."""
+    days = config.TICKET_RETENTION_DAYS
+    if days <= 0:
+        return 0
+    now = now or utcnow()
+    purged = 0
+    with SessionLocal() as db:
+        for event in db.query(Event).filter(Event.tickets_purged_at.is_(None)).all():
+            if event_end_utc(event) + timedelta(days=days) > now:
+                continue
+            shutil.rmtree(event_ticket_dir(event.id), ignore_errors=True)
+            db.query(SpareTicket).filter(SpareTicket.event_id == event.id).delete()
+            db.query(Ticket).filter(Ticket.event_id == event.id).update({Ticket.file_path: ""})
+            ids = [i for (i,) in db.query(Attendee.id).filter(Attendee.event_id == event.id)]
+            if ids:
+                db.query(TicketBundle).filter(TicketBundle.attendee_id.in_(ids)).delete(synchronize_session=False)
+            db.query(AppSetting).filter(AppSetting.key.like(f"tkh.{event.id}.%")).delete(synchronize_session=False)
+            event.tickets_purged_at = now
+            db.commit()
+            purged += 1
+            log.info("Deleted the ticket files of event %s (%s days after it ended)", event.id, days)
+    return purged
+
+
 async def cleanup_loop() -> None:
     await asyncio.sleep(config.WHATSAPP_CLEANUP_STARTUP_DELAY)
     while True:
+        try:
+            purge_old_tickets()
+        except Exception:
+            log.exception("Ticket file cleanup failed")
         try:
             n = await cleanup_due_messages()
             if n:
@@ -494,7 +527,7 @@ def load_issues(db: Session, event_id: int) -> list[dict]:
 
 
 def manage_ctx(db: Session, user: User, event: Event, **extra) -> dict:
-    tickets = db.query(func.count(Ticket.id)).filter(Ticket.event_id == event.id).scalar()
+    tickets = db.query(func.count(Ticket.id)).filter(Ticket.event_id == event.id, Ticket.file_path != "").scalar()
     status = ticket_status(db, event.id)
     warnings = list(extra.pop("warnings", []))
     if status["missing"]:
@@ -756,6 +789,107 @@ async def upload_ticket_pdf(
     return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs))
 
 
+@app.post("/events/{event_id}/tickets/drive", response_class=HTMLResponse)
+async def upload_tickets_from_drive(
+    event_id: int, request: Request, links: str = Form(""), replace: str = Form(""),
+    user: User = Depends(require_admin), db: Session = Depends(get_db),
+):
+    """Fetch ticket PDFs from Google Drive share links (one per line; the files must be shared with 'anyone with the link')."""
+    event = get_event_or_404(db, event_id)
+    urls = [u for u in re.split(r"[\s,]+", links) if u][:20]
+    if not urls:
+        return render(request, "manage.html", manage_ctx(db, user, event, errors=["Paste a Google Drive link."]), status=422)
+    msgs, errors = [], []
+    for index, url in enumerate(urls):
+        try:
+            content = await fetch_drive_pdf(url)
+            result = add_ticket_pdf(db, event.id, content, replace=replace == "on" and index == 0)
+        except (DriveError, PdfProcessingError) as exc:
+            errors.append(f"{url[:70]}: {exc}")
+            continue
+        msgs.append(f"Drive file {index + 1}: added {result['pages']} page(s); assigned {result['assigned']} ticket(s) to guests."
+                    + (f" {result['spare']} spare." if result["spare"] else ""))
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, errors=errors),
+                  status=422 if errors and not msgs else 200)
+
+
+def api_error(status: int, detail: str) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": detail}, status_code=status)
+
+
+def match_or_create_event(db: Session, header: dict, meta: dict) -> tuple[Event | None, bool, str]:
+    """The event a ticket file belongs to: same opponent and same day. Without a date on the first page the nearest
+    upcoming game against that opponent. Creates the event when the date is known but nothing matches.
+    Returns (event, created, problem)."""
+    from .pdfs import _letters
+    opponent = header["opponent"]
+    key = _letters(opponent)
+    games = [e for e in db.query(Event).order_by(Event.event_date).all() if key and key in _letters(e.name)]
+    when = meta["when"]
+    if when is None:
+        upcoming = [e for e in games if e.event_date >= utcnow() - timedelta(days=1)]
+        if upcoming:
+            return upcoming[0], False, ""
+        return None, False, "No date found on the first page and no existing game against " + opponent + "."
+    for event in games:
+        if abs((event.event_date.date() - when.date()).days) == 0:
+            return event, False, ""
+    place = meta["location"] or ("" if header["away"] else data.DEFAULT_LOCATION)
+    event = Event(name=f"{data.HOME_TEAM} {data.VERSUS} {opponent}", location=place,
+                  event_date=when if meta["has_time"] else when.replace(hour=20))
+    db.add(event)
+    db.commit()
+    return event, True, ""
+
+
+@app.post("/api/tickets")
+async def api_upload_tickets(
+    request: Request, file: UploadFile = File(None), header: str = Form(""), url: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Automatic ticket upload from another service. Authenticate with the TICKETS_API_KEY (header X-API-Key or
+    'Authorization: Bearer'). Send multipart form data: `file` (the PDF) or `url` (a Google Drive link), and `header`
+    (the mail subject / title, e.g. 'קיבלת כרטיסים למכבי ראפיד ת"א - עירוני קריית אתא - לא מסומן'). The opponent comes
+    from the header, date and venue from the first page; the event is created when it does not exist yet."""
+    if not config.TICKETS_API_KEY:
+        return api_error(503, "The upload API is switched off: set TICKETS_API_KEY.")
+    given = request.headers.get("x-api-key") or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    if not given or not secrets.compare_digest(given.encode(), config.TICKETS_API_KEY.encode()):
+        return api_error(401, "Wrong or missing API key.")
+    header = header or (file.filename if file and file.filename else "")
+    try:
+        info = parse_ticket_header(header)
+    except ValueError as exc:
+        return api_error(422, f"header: {exc}")
+    try:
+        if file is not None and file.filename:
+            content = await file.read(config.MAX_PDF_BYTES + 1)
+            if len(content) > config.MAX_PDF_BYTES:
+                return api_error(413, f"File is too large ({config.MAX_PDF_BYTES // (1024 * 1024)} MB max).")
+        elif url:
+            content = await fetch_drive_pdf(url)
+        else:
+            return api_error(422, "Send the PDF as `file` or a Google Drive link as `url`.")
+        meta = read_ticket_meta(content)
+        event, created, problem = match_or_create_event(db, info, meta)
+        if event is None:
+            return api_error(422, problem)
+        digest = f"tkh.{event.id}.{hashlib.sha256(content).hexdigest()[:24]}"
+        if db.get(AppSetting, digest) and (db.query(Ticket).filter(Ticket.event_id == event.id).first()
+                                           or db.query(SpareTicket).filter(SpareTicket.event_id == event.id).first()):
+            return {"ok": True, "duplicate": True, "event_id": event.id, "event": event.name,
+                    "message": "This exact file was uploaded before - nothing changed."}
+        result = add_ticket_pdf(db, event.id, content)
+    except (DriveError, PdfProcessingError) as exc:
+        return api_error(422, str(exc))
+    db.merge(AppSetting(key=digest, value=utcnow().isoformat()))
+    db.commit()
+    return {"ok": True, "duplicate": False, "created_event": created, "event_id": event.id, "event": event.name,
+            "date": event.event_date.isoformat(timespec="minutes"), "location": event.location, "opponent": info["opponent"],
+            "seating": info["seating"], "pages": result["pages"], "assigned": result["assigned"],
+            "spare": result["spare"], "missing": result["missing"]}
+
+
 @app.post("/events/{event_id}/delete", response_class=HTMLResponse)
 def delete_event(event_id: int, request: Request, user: User = Depends(require_admin),
                  db: Session = Depends(get_db)):
@@ -769,6 +903,7 @@ def delete_event(event_id: int, request: Request, user: User = Depends(require_a
                              delete_at=msg.delete_at or schedule_delete_at(event), attempts=msg.attempts))
     for model in (SentMessage, SpareTicket, ImportIssue, Ticket):
         db.query(model).filter(model.event_id == event.id).delete()
+    db.query(AppSetting).filter(AppSetting.key.like(f"tkh.{event.id}.%")).delete(synchronize_session=False)
     db.query(Attendee).filter(Attendee.event_id == event.id).delete()
     db.delete(event)
     db.commit()

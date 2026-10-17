@@ -4,6 +4,7 @@ import json
 import re
 import os
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 _TMP = tempfile.mkdtemp(prefix="gate-tests-")
@@ -21,7 +22,7 @@ from app import config, services  # noqa: E402
 from app.auth import hash_password  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import Attendee, Event, Role, Ticket, User  # noqa: E402
+from app.models import Attendee, Event, Role, SpareTicket, Ticket, User  # noqa: E402
 
 
 def make_pdf(pages: int) -> bytes:
@@ -2467,3 +2468,211 @@ def test_error_hints_explain_the_usual_evolution_failures(admin, lines3):
         db.commit()
     page = admin.get("/lines").text
     assert "Connection Closed" in page and "only ONE Evolution stack" in page.replace("ONE Evolution stack", "only ONE Evolution stack") or "ONE Evolution stack" in page
+
+
+# --------------------------------------------------------------------------- Drive, API upload, compression, retention
+
+
+def ticket_pdf(pages: int = 2, text: str = "17/10/2026 20:30", qr_text: str = "GATE-TICKET-{n}") -> bytes:
+    """Pages with a big photo-like (noisy) image, a QR-code image and some text on the first page."""
+    import random as _r
+    import segno
+    from PIL import Image
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    for n in range(1, pages + 1):
+        rnd = _r.Random(n)
+        import numpy as np
+        yy, xx = np.mgrid[0:2400, 0:2400]
+        base = np.stack([(xx * 255 // 2400), (yy * 255 // 2400), ((xx + yy) * 255 // 4800)], axis=-1)
+        photo = Image.fromarray(np.clip(base + np.random.default_rng(n).normal(0, 6, base.shape), 0, 255).astype("uint8"))
+        qr_buf = io.BytesIO()
+        segno.make(qr_text.format(n=n), error="m", micro=False).save(qr_buf, kind="png", scale=24, border=4)
+        from PIL import ImageOps
+        qr = ImageOps.expand(Image.open(qr_buf).convert("RGB"), 120, fill="white")      # quiet zone around the code
+        for img, box in ((photo, (0, 0)), (qr, (0, 0))):
+            b = io.BytesIO()
+            img.save(b, "PDF", resolution=150, quality=100)
+            src = PdfReader(b).pages[0]
+            if box == (0, 0) and img is photo:
+                page = writer.add_page(src)
+            else:
+                page.merge_page(src)
+        if n == 1 and text:
+            font = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
+                                     NameObject("/BaseFont"): NameObject("/Helvetica")})
+            page[NameObject("/Resources")][NameObject("/Font")] = DictionaryObject({NameObject("/F1"): writer._add_object(font)})
+            stream = DecodedStreamObject()
+            stream.set_data(f"BT /F1 24 Tf 40 40 Td ({text}) Tj ET".encode())
+            old = page.get_contents()
+            merged = DecodedStreamObject()
+            merged.set_data((old.get_data() if old else b"") + b"\n" + stream.get_data())
+            page[NameObject("/Contents")] = writer._add_object(merged)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+def test_compression_shrinks_and_keeps_qr_scannable(tmp_path, monkeypatch):
+    cv2 = pytest.importorskip("cv2")
+    import numpy as np
+    from PIL import Image
+
+    monkeypatch.setattr(config, "STORAGE_DIR", tmp_path)
+    content = ticket_pdf(2)
+    monkeypatch.setattr(config, "PDF_COMPRESS", False)
+    plain = services.split_pdf(content, 1)
+    monkeypatch.setattr(config, "PDF_COMPRESS", True)
+    packed = services.split_pdf(content, 2)
+    assert sum(p.stat().st_size for p in packed) < 0.6 * sum(p.stat().st_size for p in plain)
+    for n, path in enumerate(packed, start=1):
+        found = []
+        for image in PdfReader(str(path)).pages[0].images:
+            arr = np.array(image.image.convert("RGB"))
+            text, _, _ = cv2.QRCodeDetector().detectAndDecode(arr)
+            if text:
+                found.append(text)
+        assert found == [f"GATE-TICKET-{n}"]
+
+
+def test_flat_images_stay_lossless_and_unusual_pdfs_still_split(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "STORAGE_DIR", tmp_path)
+    paths = services.split_pdf(make_pdf(3), 5)       # blank pages: nothing to optimise, must not fail
+    assert len(paths) == 3 and all(len(PdfReader(str(p)).pages) == 1 for p in paths)
+
+
+def test_parse_ticket_header():
+    from app.pdfs import parse_ticket_header
+    got = parse_ticket_header('קיבלת כרטיסים למכבי ראפיד ת"א - עירוני קריית אתא - לא מסומן')
+    assert got == {"opponent": "עירוני קריית אתא", "away": False, "seating": "לא מסומן"}
+    assert parse_ticket_header('קיבלת כרטיסים להפועל תל אביב - מכבי תל אביב')["away"] is True
+    assert parse_ticket_header("קיבלת כרטיסים למכבי תל אביב – עירוני קרית אתא")["opponent"] == "עירוני קריית אתא"   # spelling normalised
+    with pytest.raises(ValueError):
+        parse_ticket_header("hello")
+
+
+def test_read_ticket_meta_date_time_and_arena(monkeypatch):
+    from app import pdfs
+    meta = pdfs.read_ticket_meta(ticket_pdf(1, text="Game 17/10/2026 20:30 doors"))
+    assert meta["when"] == datetime(2026, 10, 17, 20, 30) and meta["has_time"]
+    assert pdfs.read_ticket_meta(ticket_pdf(1, text="Date 5.1.27"))["when"] == datetime(2027, 1, 5)
+    assert pdfs._arena_in("שער 3 היכל פיס ארנה קומה 2") == "פיס ארנה"
+    assert pdfs._arena_in("הארנה אפרת"[::-1]) == ""
+    assert pdfs._date_in("17 באוקטובר 2026 21:00") == datetime(2026, 10, 17, 21, 0)
+    assert pdfs.read_ticket_meta(b"not a pdf") == {"when": None, "has_time": False, "location": ""}
+
+
+def test_drive_links_and_download():
+    import asyncio
+    import httpx
+    from app import pdfs
+    assert pdfs.drive_file_id("https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view?usp=sharing") == "1AbCdEfGhIjKlMnOp"
+    assert pdfs.drive_file_id("https://drive.google.com/open?id=1AbCdEfGhIjKlMnOp") == "1AbCdEfGhIjKlMnOp"
+    for bad in ("https://evil.example/file/d/1AbCdEfGhIjKlMnOp", "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp"):
+        with pytest.raises(pdfs.DriveError):
+            pdfs.drive_file_id(bad)
+
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        return httpx.Response(200, content=make_pdf(1)) if "good" in request.url.params["id"] else httpx.Response(200, content=b"<html>sign in</html>")
+
+    async def run(file_id):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await pdfs.fetch_drive_pdf(f"https://drive.google.com/file/d/{file_id}/view", client)
+
+    assert asyncio.run(run("good-file-id-123")).startswith(b"%PDF")
+    assert seen["url"].startswith("https://drive.usercontent.google.com/download?")
+    with pytest.raises(pdfs.DriveError):
+        asyncio.run(run("private-file-id-1"))
+
+
+def test_drive_form_adds_tickets(client, admin, event_id, monkeypatch):
+    from app import main as main_module
+
+    async def fake_fetch(link, client=None):
+        if "bad" in link:
+            raise main_module.DriveError("not shared")
+        return make_pdf(2)
+
+    monkeypatch.setattr(main_module, "fetch_drive_pdf", fake_fetch)
+    r = admin.post(f"/events/{event_id}/tickets/drive",
+                   data={"links": "https://drive.google.com/file/d/goodgoodgood1/view\nhttps://drive.google.com/file/d/badbadbadbad/view"})
+    assert r.status_code == 200 and "added 2 page(s)" in r.text and "not shared" in r.text
+    assert admin.post(f"/events/{event_id}/tickets/drive", data={"links": " "}).status_code == 422
+
+
+@pytest.fixture()
+def api_key(monkeypatch):
+    monkeypatch.setattr(config, "TICKETS_API_KEY", "k-test-key-123")
+    return {"X-API-Key": "k-test-key-123"}
+
+
+HEADER = 'קיבלת כרטיסים למכבי ראפיד ת"א - עירוני קריית אתא - לא מסומן'
+
+
+def test_api_requires_the_key(client, monkeypatch):
+    files = {"file": ("t.pdf", make_pdf(1), "application/pdf")}
+    monkeypatch.setattr(config, "TICKETS_API_KEY", "")
+    assert client.post("/api/tickets", files=files, data={"header": HEADER}).status_code == 503
+    monkeypatch.setattr(config, "TICKETS_API_KEY", "k-test-key-123")
+    assert client.post("/api/tickets", files=files, data={"header": HEADER}).status_code == 401
+    assert client.post("/api/tickets", files=files, data={"header": HEADER}, headers={"X-API-Key": "nope"}).status_code == 401
+    r = client.post("/api/tickets", files=files, data={"header": "junk"}, headers={"Authorization": "Bearer k-test-key-123"})
+    assert r.status_code == 422 and r.json()["ok"] is False
+
+
+def test_api_creates_the_event_from_header_and_first_page(client, api_key, monkeypatch):
+    monkeypatch.setattr(config, "STORAGE_DIR", config.STORAGE_DIR)
+    pdf = ticket_pdf(2, text="Game 17/10/2031 20:30")
+    r = client.post("/api/tickets", files={"file": ("t.pdf", pdf, "application/pdf")}, data={"header": HEADER}, headers=api_key)
+    body = r.json()
+    assert r.status_code == 200 and body["ok"] and body["created_event"] and body["pages"] == 2
+    assert body["event"] == "מכבי תל אביב נגד עירוני קריית אתא" and body["date"] == "2031-10-17T20:30"
+    assert body["location"] == "בית (היכל מנורה מבטחים)" and body["spare"] == 2
+    # the same game again: same event, new pages are added; the very same file is recognised
+    again = client.post("/api/tickets", files={"file": ("t.pdf", pdf, "application/pdf")}, data={"header": HEADER}, headers=api_key).json()
+    assert again["duplicate"] is True and again["event_id"] == body["event_id"]
+    other = ticket_pdf(1, text="Game 17/10/2031 20:30", qr_text="OTHER-{n}")
+    more = client.post("/api/tickets", files={"file": ("u.pdf", other, "application/pdf")}, data={"header": HEADER}, headers=api_key).json()
+    assert more["created_event"] is False and more["event_id"] == body["event_id"] and more["spare"] == 3
+    with SessionLocal() as db:
+        files = [t.file_path for t in db.query(SpareTicket).filter(SpareTicket.event_id == body["event_id"])]
+    assert len(files) == 3 and all(Path(f).is_file() for f in files)
+
+
+def test_api_without_a_date_needs_an_existing_game(client, api_key):
+    r = client.post("/api/tickets", files={"file": ("t.pdf", make_pdf(1), "application/pdf")},
+                    data={"header": 'קיבלת כרטיסים למכבי ת"א - הפועל אילת - לא מסומן'}, headers=api_key)
+    assert r.status_code == 422 and "הפועל אילת" in r.json()["error"]
+
+
+def test_ticket_files_are_deleted_a_month_after_the_event(client, admin, tmp_path, monkeypatch):
+    from app import main as main_module
+    old = datetime.utcnow() - timedelta(days=45)
+    recent = datetime.utcnow() - timedelta(days=10)
+    with SessionLocal() as db:
+        ids = []
+        for when in (old, recent):
+            ev = Event(name="Gala", location="Hall", event_date=when)
+            db.add(ev)
+            db.commit()
+            db.add(Attendee(event_id=ev.id, name="Ann", phone="972501234567", adult_count=1, ticket_count=1))
+            db.commit()
+            ids.append(ev.id)
+    for eid in ids:
+        assert admin.post(f"/events/{eid}/tickets/upload", files={"file": ("t.pdf", make_pdf(2), "application/pdf")}).status_code == 200
+    assert services.event_ticket_dir(ids[0]).exists()
+    assert main_module.purge_old_tickets() >= 1
+    assert not services.event_ticket_dir(ids[0]).exists() and services.event_ticket_dir(ids[1]).exists()
+    with SessionLocal() as db:
+        assert db.get(Event, ids[0]).tickets_purged_at is not None and db.get(Event, ids[1]).tickets_purged_at is None
+        assert {t.file_path for t in db.query(Ticket).filter(Ticket.event_id == ids[0])} == {""}
+        assert db.query(SpareTicket).filter(SpareTicket.event_id == ids[0]).count() == 0
+        token = db.query(Ticket).filter(Ticket.event_id == ids[0]).first().claim_token
+    assert client.get(f"/tickets/claim/{token}/ticket.pdf").status_code == 404
+    assert "deleted automatically" in admin.get(f"/events/{ids[0]}/manage").text
+    monkeypatch.setattr(config, "TICKET_RETENTION_DAYS", 0)
+    assert main_module.purge_old_tickets() == 0

@@ -163,6 +163,19 @@
       <button type="button" class="up-cancel mt-2 text-xs text-slate-400 underline hover:text-white">Cancel upload</button>
     </div>
   </form>
+  <form method="post" action="/events/{{ event.id }}/tickets/drive" class="mt-4 flex flex-col gap-3 border-t border-slate-800 pt-4">
+    <label class="text-sm text-slate-400" for="drive-links"><i class="ph ph-google-drive-logo"></i> Or fetch from Google Drive - paste the link(s), one per line.
+      The file must be shared as “Anyone with the link”.</label>
+    <div class="flex flex-col gap-3 sm:flex-row">
+      <textarea id="drive-links" name="links" rows="2" required placeholder="https://drive.google.com/file/d/…/view" dir="ltr"
+                class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-200 placeholder-slate-600"></textarea>
+      <button class="flex items-center justify-center gap-2 self-start rounded-xl bg-brand-500 px-5 py-3 text-sm font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-cloud-arrow-down"></i> Fetch &amp; assign</button>
+    </div>
+    <label class="flex items-center gap-2 text-sm text-slate-400"><input type="checkbox" name="replace" class="h-4 w-4 rounded"
+      onclick="if(this.checked&&!confirm('Replace ALL existing tickets and spare pages? Links already sent will stop working.')) this.checked=false">
+      Start over: replace all existing tickets</label>
+  </form>
+  {% if event.tickets_purged_at %}<p class="mt-3 text-xs text-amber-300">The ticket files of this event were deleted automatically on {{ event.tickets_purged_at.strftime('%Y-%m-%d') }} (retention period over).</p>{% endif %}
 </section>
 
 
