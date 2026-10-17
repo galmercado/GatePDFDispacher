@@ -1699,8 +1699,8 @@ async def refresh_line(line_id: int, request: Request, user: User = Depends(requ
 
 
 @app.post("/lines/{line_id}/connect", response_class=HTMLResponse)
-async def connect_line(line_id: int, request: Request, number: str = Form(""), user: User = Depends(require_admin),
-                       db: Session = Depends(get_db)):
+async def connect_line(line_id: int, request: Request, number: str = Form(""), poll: str = Form(""),
+                       user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Popup content: QR code (refreshed every few seconds) or pairing code; closes itself once linked."""
     line = get_line_or_404(db, line_id)
     ctx = {"line": line, "connected": False, "qr": "", "pairing_code": "", "error": ""}
@@ -1717,6 +1717,14 @@ async def connect_line(line_id: int, request: Request, number: str = Form(""), u
             await linesmod.on_connected(db, line, phone_fn=evolution_owner_number, profile_fn=evolution_set_profile)
             return render(request, "partials/line_qr.html", {**ctx, "connected": True},
                           headers={"HX-Trigger": json.dumps({"lineConnected": ""})})
+        if poll and state != "connecting":
+            # The page's automatic refresh must not ask Evolution to connect while the session is closed or restarting
+            # (WhatsApp restarts it right after the QR scan): that would start a SECOND socket for the same login,
+            # and the two kick each other out forever ("conflict - replaced").
+            db.commit()
+            ctx["error"] = (f"Linking… WhatsApp is finishing the connection (state: {state}). If nothing changes within a minute, "
+                            "press Connect / QR again.")
+            return render(request, "partials/line_qr.html", ctx)
         info = await evolution_connect(line.instance_name, number or line.phone)
         db.commit()
         ctx.update(qr=info["qr"], pairing_code=info["pairing_code"])
@@ -1725,6 +1733,23 @@ async def connect_line(line_id: int, request: Request, number: str = Form(""), u
     except WhatsAppError as exc:
         ctx["error"] = str(exc)
     return render(request, "partials/line_qr.html", ctx)
+
+
+@app.post("/lines/{line_id}/reset-session", response_class=HTMLResponse)
+async def reset_line_session(line_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Start the line's WhatsApp session from scratch (delete + recreate the Evolution instance); the phone is linked again
+    with a new QR code. Use it when a session keeps looping with 'conflict - replaced'."""
+    line = get_line_or_404(db, line_id)
+    try:
+        await evolution_delete_instance(line.instance_name)
+        await asyncio.sleep(1.5)
+        await evolution_create_instance(line.instance_name)
+    except WhatsAppError as exc:
+        return render(request, "lines.html", lines_ctx(db, user, errors=[f"Could not reset {line.label}: {exc}"]), status=422)
+    line.status, line.connection, line.profile_set, line.last_error, line.failed_at = "pending", "unknown", False, None, None
+    db.commit()
+    return render(request, "lines.html", lines_ctx(db, user, messages=[
+        f"{line.label}: session reset. Press Connect / QR and scan the code ONCE with the phone."]))
 
 
 @app.post("/lines/profile-all", response_class=HTMLResponse)

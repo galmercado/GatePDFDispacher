@@ -100,6 +100,7 @@
     {% if l.status == 'failed' %}<form method="post" action="/lines/{{ l.id }}/reset"><button class="rounded-lg border border-emerald-500/40 px-3 py-1.5 text-emerald-300 hover:bg-emerald-500/10">Mark as working</button></form>{% endif %}
     {% if not loop.first %}<form method="post" action="/lines/{{ l.id }}/primary"><button class="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800">Make first</button></form>{% endif %}
     <form method="post" action="/lines/{{ l.id }}/toggle"><button class="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800">{{ 'Enable' if l.status == 'disabled' else 'Disable' }}</button></form>
+    <form method="post" action="/lines/{{ l.id }}/reset-session" onsubmit="return confirm('Reset this line\'s WhatsApp session? The phone has to be linked again with a new QR code.')"><button class="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800" title="Start the session from scratch (fixes a conflict/replaced loop)"><i class="ph ph-arrow-counter-clockwise"></i> Reset session</button></form>
     <form method="post" action="/lines/{{ l.id }}/delete" onsubmit="return confirm('Remove this line and its Evolution instance?')"><button class="rounded-lg border border-rose-500/40 px-3 py-1.5 text-rose-300 hover:bg-rose-500/10"><i class="ph ph-trash"></i></button></form>
   </div>
 </article>

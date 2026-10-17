@@ -151,6 +151,13 @@ A re-encoded image is used only if it is really smaller. Tests decode the QR cod
 **Retention.** Ticket PDFs are deleted `TICKET_RETENTION_DAYS` (default 30) after the event ends, checked every 10 minutes
 (Settings → Cleanup; 0 keeps them). Guests and attendance stay; the tickets lose their file, so old download links stop working.
 
+### A line stuck on "connecting" / "conflict - replaced" loop
+
+If the Evolution log shows `CONNECTED TO WHATSAPP` twice per second together with `stream:error conflict type="replaced"`, two sockets
+use the same WhatsApp login and kick each other out. The QR popup no longer asks Evolution to connect while a session is closed or restarting
+(WhatsApp restarts it right after the scan), which was one way to cause this. To clear a loop that is already running:
+`docker compose restart evolution-api`, or on the Lines page press **Reset session** for that line and scan the QR code **once**.
+
 ## Site settings (admin)
 
 The **Settings** page (sliders icon) edits the main constants without touching files: the **ticket message wording** (greetings, main sentence, ticket counter, date line,

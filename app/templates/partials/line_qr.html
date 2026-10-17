@@ -6,7 +6,7 @@
 {% if connected %}
 <div class="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-center text-emerald-200"><i class="ph-fill ph-check-circle text-3xl"></i><p class="mt-1 font-semibold">Connected</p></div>
 {% else %}
-<div hx-post="/lines/{{ line.id }}/connect" hx-trigger="every 12s" hx-target="#line-content" hx-swap="innerHTML" hx-include="#pair-number">
+<div hx-post="/lines/{{ line.id }}/connect" hx-trigger="every 12s" hx-vals='{"poll": "1"}' hx-target="#line-content" hx-swap="innerHTML" hx-include="#pair-number">
   {% if error %}<div class="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">{{ error }}</div>{% endif %}
   {% if qr %}
   <div class="mb-2 rounded-2xl bg-white p-3"><img src="{{ qr }}" alt="WhatsApp QR code" class="mx-auto w-full max-w-[260px]"></div>

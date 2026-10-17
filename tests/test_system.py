@@ -2816,3 +2816,53 @@ def test_a_second_line_on_the_same_number_is_disabled(lines3):
         asyncio.run(linesmod.on_connected(db, second))
         db.refresh(second)
         assert second.status == "disabled" and first.label in second.last_error
+
+
+def test_qr_refresh_never_starts_a_second_connection_while_the_session_is_closed(admin, lines3, monkeypatch):
+    from app.models import WhatsAppLine
+    calls = {"connect": 0}
+    state = {"v": "close"}
+
+    async def get_state(name, client=None):
+        return state["v"]
+
+    async def connect(name, number=None, client=None):
+        calls["connect"] += 1
+        return {"qr": "data:image/png;base64,AAAA", "pairing_code": "", "raw_count": 1}
+
+    monkeypatch.setattr("app.main.evolution_state", get_state)
+    monkeypatch.setattr("app.main.evolution_connect", connect)
+    with SessionLocal() as db:
+        lid = db.query(WhatsAppLine.id).first()[0]
+    assert "data:image/png" in admin.post(f"/lines/{lid}/connect").text and calls["connect"] == 1          # the person pressed Connect
+    r = admin.post(f"/lines/{lid}/connect", data={"poll": "1"})                                              # automatic refresh while 'close'
+    assert calls["connect"] == 1 and "finishing the connection" in r.text
+    state["v"] = "connecting"
+    admin.post(f"/lines/{lid}/connect", data={"poll": "1"})                                                  # safe: only returns the cached QR
+    assert calls["connect"] == 2
+
+
+def test_reset_session_recreates_the_instance(admin, doorman, lines3, monkeypatch):
+    from app.models import WhatsAppLine
+    ops = []
+
+    async def delete_inst(name, client=None):
+        ops.append(("delete", name))
+
+    async def create(name, client=None):
+        ops.append(("create", name))
+
+    async def nosleep(_):
+        pass
+
+    monkeypatch.setattr("app.main.evolution_delete_instance", delete_inst)
+    monkeypatch.setattr("app.main.evolution_create_instance", create)
+    monkeypatch.setattr("app.main.asyncio.sleep", nosleep)
+    with SessionLocal() as db:
+        line = db.query(WhatsAppLine).first()
+        lid, name = line.id, line.instance_name
+    assert doorman.post(f"/lines/{lid}/reset-session").status_code == 403
+    r = admin.post(f"/lines/{lid}/reset-session")
+    assert ops == [("delete", name), ("create", name)] and "scan the code ONCE" in r.text
+    with SessionLocal() as db:
+        assert db.get(WhatsAppLine, lid).status == "pending"
