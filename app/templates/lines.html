@@ -47,9 +47,23 @@
   </div>
 </section>
 
+{% if strays %}
+<section class="mb-4 rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100">
+  <h2 class="mb-1 font-semibold"><i class="ph-fill ph-warning"></i> Evolution has {{ strays|length }} instance(s) that no line here uses</h2>
+  <p class="mb-2 text-xs text-amber-200/80">Leftovers (for example from a double click). An unused instance linked to a phone can fight with the real one - delete it unless you know you need it.</p>
+  {% for i in strays %}
+  <form method="post" action="/lines/stray-delete" class="flex items-center justify-between gap-2 border-t border-amber-500/20 py-1.5" onsubmit="return confirm('Delete the Evolution instance {{ i.name }}?')">
+    <span class="min-w-0 truncate">{{ i.name }}{% if i.number %} · +{{ i.number }}{% endif %}{% if i.state %} · {{ i.state }}{% endif %}</span>
+    <input type="hidden" name="name" value="{{ i.name }}">
+    <button class="shrink-0 rounded-lg border border-rose-500/40 px-3 py-1 text-xs text-rose-200 hover:bg-rose-500/10"><i class="ph ph-trash"></i> Delete</button>
+  </form>
+  {% endfor %}
+</section>
+{% endif %}
+
 <details class="mb-4 rounded-2xl border border-slate-800 bg-slate-900">
   <summary class="cursor-pointer list-none p-4 font-semibold text-white"><i class="ph ph-plus-circle text-brand-400"></i> Add one line</summary>
-  <form method="post" action="/lines" class="grid gap-3 border-t border-slate-800 p-4 sm:grid-cols-3">
+  <form method="post" action="/lines" onsubmit="const b=this.querySelector('button'); if(b.disabled) return false; b.disabled=true; b.classList.add('opacity-50')" class="grid gap-3 border-t border-slate-800 p-4 sm:grid-cols-3">
     <div><label class="{{ label }}">Name</label><input name="label" placeholder="e.g. Orange SIM" class="{{ field }}"></div>
     <div><label class="{{ label }}">Phone (optional)</label><input name="phone" inputmode="tel" class="{{ field }}"></div>
     <div><label class="{{ label }}">Daily limit</label><input name="daily_cap" inputmode="numeric" placeholder="150" class="{{ field }}"></div>

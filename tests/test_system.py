@@ -1568,7 +1568,10 @@ def test_lines_manager_is_admin_only_and_manages_lines(admin, doorman, lines3, m
     page = admin.get("/lines").text
     assert "3 of 3 line(s) working" in page and "L1" in page
     r = admin.post("/lines", data={"label": "Spare SIM", "daily_cap": "80", "phone": "052-9999999"})
-    assert r.status_code == 200 and "Added “Spare SIM”" in r.text and created == ["event-door-4"]
+    assert r.status_code == 303 and created == ["event-door-4"]
+    assert "Added “Spare SIM”" in admin.get(r.headers["location"]).text
+    again = admin.post("/lines", data={"label": "Spare SIM", "daily_cap": "80", "phone": "052-9999999"})   # double click / refresh
+    assert again.status_code == 303 and created == ["event-door-4"]                    # no second instance
     assert admin.post("/lines", data={"label": "x", "daily_cap": "abc"}).status_code == 422
     r = admin.post("/lines/bulk")
     assert "Created 6 line(s)" in r.text and len(created) == 7                          # topped up to 10
@@ -2778,3 +2781,38 @@ def test_resend_gives_the_already_sent_tickets_again_without_changing_admission(
     assert "again" in r.headers["HX-Trigger"] and wa["sent"] == ["MSG1", "MSG2"] and admitted(att) == before
     r = doorman.post(f"/attendees/{att}/resend", data={"via": "qr"})
     assert "1 ticket in one ZIP" in r.text and admitted(att) == before
+
+
+def test_stray_evolution_instances_are_listed_and_can_be_removed(admin, lines3, monkeypatch):
+    removed = []
+
+    async def listing(client=None):
+        return [{"name": "event-door-1", "number": "", "state": "open"}, {"name": "ghost-9", "number": "972501112222", "state": "open"}]
+
+    async def delete_inst(name, client=None):
+        removed.append(name)
+
+    from app.models import WhatsAppLine
+    with SessionLocal() as db:
+        known = db.query(WhatsAppLine.instance_name).first()[0]
+    monkeypatch.setattr("app.main.evolution_list_instances", listing)
+    monkeypatch.setattr("app.main.evolution_delete_instance", delete_inst)
+    page = admin.get("/lines").text
+    assert "ghost-9" in page and "no line here uses" in page
+    assert "belongs to a line" in admin.post("/lines/stray-delete", data={"name": known}).text
+    admin.post("/lines/stray-delete", data={"name": "ghost-9"})
+    assert removed == ["ghost-9"]
+
+
+def test_a_second_line_on_the_same_number_is_disabled(lines3):
+    import asyncio
+    from app import lines as linesmod
+    from app.models import WhatsAppLine
+    with SessionLocal() as db:
+        first, second = db.query(WhatsAppLine).order_by(WhatsAppLine.id).limit(2).all()
+        first.phone = second.phone = "972501110000"
+        second.profile_set, second.connection = True, "open"
+        db.commit()
+        asyncio.run(linesmod.on_connected(db, second))
+        db.refresh(second)
+        assert second.status == "disabled" and first.label in second.last_error

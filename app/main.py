@@ -39,7 +39,7 @@ from .pdfs import DriveError, fetch_drive_pdf, parse_ticket_header, read_ticket_
 from .services import (
     AttendeeIn, ImportValidationError, describe_validation_error, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
     import_attendees,
-    GridRow, MemberBook, RegistrationError, evolution_connect, evolution_create_instance, evolution_owner_number, evolution_set_profile, evolution_delete_instance, evolution_state,
+    GridRow, MemberBook, RegistrationError, evolution_connect, evolution_create_instance, evolution_list_instances, evolution_owner_number, evolution_set_profile, evolution_delete_instance, evolution_state,
     event_ticket_dir, fetch_registration_page, name_keys, normalize_phone, parse_registration_grid, parse_member_file, parse_member_text, parse_registration_html, parse_rows, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, send_whatsapp_text, ticket_status,
 )
 
@@ -1548,7 +1548,7 @@ def lines_ctx(db: Session, user: User, **extra) -> dict:
         line.today_count = line.sent_today if line.sent_day == today else 0
     info = linesmod.line_summary(db)
     return {"user": user, "lines": lines, "summary": info, "minimum": config.MIN_WORKING_LINES,
-            "test_number": linesmod.test_number(db), "target": TARGET_LINES, "messages": [], "errors": [], **extra}
+            "test_number": linesmod.test_number(db), "target": TARGET_LINES, "messages": [], "errors": [], "strays": [], **extra}
 
 
 def get_line_or_404(db: Session, line_id: int) -> WhatsAppLine:
@@ -1578,9 +1578,34 @@ async def create_line(db: Session, label: str, cap: int, phone: str = "") -> Wha
     return line
 
 
+LINE_LOCK = asyncio.Lock()
+
+
+async def stray_instances(db: Session) -> list[dict]:
+    """Instances that exist in Evolution but belong to no line here (leftovers, double clicks)."""
+    known = {n for (n,) in db.query(WhatsAppLine.instance_name)}
+    return [i for i in await evolution_list_instances() if i["name"] not in known]
+
+
 @app.get("/lines", response_class=HTMLResponse)
-def lines_page(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    return render(request, "lines.html", lines_ctx(db, user))
+async def lines_page(request: Request, added: int = 0, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    messages = []
+    line = db.get(WhatsAppLine, added) if added else None
+    if line is not None:
+        messages.append(f"Added “{line.label}”. Press Connect and scan its QR code with the phone that holds this number.")
+    return render(request, "lines.html", lines_ctx(db, user, messages=messages, strays=await stray_instances(db)))
+
+
+@app.post("/lines/stray-delete", response_class=HTMLResponse)
+async def delete_stray_instance(request: Request, name: str = Form(""), user: User = Depends(require_admin),
+                                db: Session = Depends(get_db)):
+    if db.query(WhatsAppLine).filter(WhatsAppLine.instance_name == name).first():
+        return render(request, "lines.html", lines_ctx(db, user, errors=["That instance belongs to a line - remove the line instead."]), status=422)
+    try:
+        await evolution_delete_instance(name)
+    except WhatsAppError as exc:
+        return render(request, "lines.html", lines_ctx(db, user, errors=[f"Could not remove {name}: {exc}"], strays=await stray_instances(db)), status=422)
+    return render(request, "lines.html", lines_ctx(db, user, messages=[f"Removed the stray instance {name}."], strays=await stray_instances(db)))
 
 
 @app.post("/lines", response_class=HTMLResponse)
@@ -1593,25 +1618,32 @@ async def add_line(request: Request, label: str = Form(""), daily_cap: str = For
             raise ValueError
     except ValueError:
         return render(request, "lines.html", lines_ctx(db, user, errors=["Daily limit must be a number between 1 and 5000."]), status=422)
-    try:
-        line = await create_line(db, label, cap, phone)
-    except WhatsAppError as exc:
-        return render(request, "lines.html", lines_ctx(db, user, errors=[f"Could not create the line: {exc}"]), status=422)
-    return render(request, "lines.html", lines_ctx(db, user, messages=[
-        f"Added “{line.label}”. Press Connect and scan its QR code with the phone that holds this number."]))
+    async with LINE_LOCK:       # one creation at a time: a double click must not make two instances
+        recent = db.query(WhatsAppLine).filter(WhatsAppLine.created_at > utcnow() - timedelta(seconds=15),
+                                               WhatsAppLine.status == "pending").first()
+        if recent is not None:
+            return RedirectResponse(f"/lines?added={recent.id}", status_code=303)
+        if phone.strip() and db.query(WhatsAppLine).filter(WhatsAppLine.phone == normalize_phone(phone)).first():
+            return render(request, "lines.html", lines_ctx(db, user, errors=["A line with that phone number already exists."]), status=422)
+        try:
+            line = await create_line(db, label, cap, phone)
+        except WhatsAppError as exc:
+            return render(request, "lines.html", lines_ctx(db, user, errors=[f"Could not create the line: {exc}"]), status=422)
+    return RedirectResponse(f"/lines?added={line.id}", status_code=303)       # redirect: a page refresh cannot create another
 
 
 @app.post("/lines/bulk", response_class=HTMLResponse)
 async def add_lines_bulk(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Top up to TARGET_LINES (10) lines so there are always spares ready; each still needs its QR scan."""
     made, errors = 0, []
-    while db.query(WhatsAppLine).count() < TARGET_LINES:
-        try:
-            await create_line(db, f"Line {db.query(WhatsAppLine).count() + 1}", config.LINE_DAILY_CAP)
-            made += 1
-        except WhatsAppError as exc:
-            errors.append(f"Stopped after {made} new line(s): {exc}")
-            break
+    async with LINE_LOCK:
+        while db.query(WhatsAppLine).count() < TARGET_LINES:
+            try:
+                await create_line(db, f"Line {db.query(WhatsAppLine).count() + 1}", config.LINE_DAILY_CAP)
+                made += 1
+            except WhatsAppError as exc:
+                errors.append(f"Stopped after {made} new line(s): {exc}")
+                break
     msgs = [f"Created {made} line(s). Connect each one by scanning its QR code."] if made else ["There are already {0} lines.".format(TARGET_LINES)]
     return render(request, "lines.html", lines_ctx(db, user, messages=msgs, errors=errors), status=422 if errors else 200)
 

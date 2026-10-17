@@ -173,6 +173,15 @@ async def on_connected(db: Session, line: WhatsAppLine, phone_fn=None, profile_f
             db.commit()
         except Exception:
             log.exception("Could not read the phone number of %s", line.label)
+    if line.phone and line.status != "disabled":
+        twin = db.query(WhatsAppLine).filter(WhatsAppLine.phone == line.phone, WhatsAppLine.id != line.id,
+                                             WhatsAppLine.status != "disabled").order_by(WhatsAppLine.id).first()
+        if twin is not None and twin.id < line.id:      # the older line keeps the number; the newer one is a duplicate
+            line.status = "disabled"
+            line.last_error = (f"Same WhatsApp number (+{line.phone}) as “{twin.label}”. Two instances on one number "
+                               "disturb each other, so this line was disabled - delete it.")
+            db.commit()
+            return
     if config.WHATSAPP_AUTO_PROFILE and not line.profile_set and line.connection == "open":
         await apply_profile(db, line, profile_fn)
 

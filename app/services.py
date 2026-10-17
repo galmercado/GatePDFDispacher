@@ -1017,6 +1017,24 @@ def parse_member_file(filename: str, content: bytes) -> list[tuple[str, str]]:
 
 # --------------------------------------------------------------------------- WhatsApp account of a line
 
+async def evolution_list_instances(client: httpx.AsyncClient | None = None) -> list[dict]:
+    """Every instance Evolution knows: [{'name', 'number', 'state'}]. Empty list if Evolution cannot be asked."""
+    try:
+        resp = await _gateway_call("GET", "/instance/fetchInstances", None, client, instance="", throttled=False)
+        body = resp.json()
+    except (WhatsAppError, ValueError):
+        return []
+    out = []
+    for item in body if isinstance(body, list) else []:
+        item = item.get("instance", item) if isinstance(item, dict) else {}
+        name = item.get("name") or item.get("instanceName")
+        if name:
+            raw = item.get("ownerJid") or item.get("owner") or item.get("number") or ""
+            out.append({"name": str(name), "number": re.sub(r"\D", "", str(raw).split("@")[0].split(":")[0]),
+                        "state": str(item.get("connectionStatus") or item.get("status") or "")})
+    return out
+
+
 async def evolution_owner_number(name: str, client: httpx.AsyncClient | None = None) -> str | None:
     """The phone number the instance is linked to (digits), or None if unknown / not linked yet."""
     try:
