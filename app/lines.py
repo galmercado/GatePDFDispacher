@@ -88,8 +88,18 @@ def mark_failed(db: Session, line: WhatsAppLine, error: Exception) -> None:
     log.warning("WhatsApp line %s (%s) marked as not functioning: %s", line.label, line.instance_name, error)
 
 
+async def deliver_text(db: Session, phone: str, text: str, sender) -> WhatsAppLine:
+    """Send a plain text message through the best available line (same fail-over rules as deliver_pdf)."""
+    _, line = await _deliver(db, lambda line: sender(phone, text, instance=line.instance_name))
+    return line
+
+
 async def deliver_pdf(db: Session, phone: str, path: str, caption: str, file_name: str,
                       sender: Sender) -> tuple[SentRef | None, WhatsAppLine]:
+    return await _deliver(db, lambda line: sender(phone, path, caption, file_name=file_name, instance=line.instance_name))
+
+
+async def _deliver(db: Session, call) -> tuple[SentRef | None, WhatsAppLine]:
     """Send one ticket PDF through the best available line, failing over to the next one.
 
     A line is only declared *not functioning* when it errored (HTTP 5xx / dropped session) and another line then
@@ -104,7 +114,7 @@ async def deliver_pdf(db: Session, phone: str, path: str, caption: str, file_nam
     last: WhatsAppError | None = None
     for line in lines:
         try:
-            ref = await sender(phone, path, caption, file_name=file_name, instance=line.instance_name)
+            ref = await call(line)
         except WhatsAppError as exc:
             if not exc.line_problem:
                 raise                       # another number would not help

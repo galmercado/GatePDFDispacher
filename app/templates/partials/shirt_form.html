@@ -7,13 +7,23 @@
 </div>
 {% if errors %}<div class="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">
   <ul class="list-inside list-disc">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
-<p class="mb-3 text-sm text-slate-300">Send {{ count }} ticket{{ 's' if count != 1 }} now - by WhatsApp link or by scanning a QR code. The guest is then
-  <b class="text-yellow-300">flagged yellow and locked</b> and is not counted as admitted until someone presses <b>Admitted</b>.</p>
+<div class="mb-3 rounded-xl bg-slate-950 p-3 text-sm text-slate-300" dir="rtl">
+  נשארו להכניס: <b class="text-amber-300">{{ attendee.remaining_total }}</b> כרטיסים
+</div>
 <form hx-post="/attendees/{{ attendee.id }}/shirt-missing" hx-target="#qr-content" hx-swap="innerHTML">
+  <p class="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">How many tickets are missing a shirt?</p>
+  <div class="mb-3 flex items-stretch overflow-hidden rounded-xl border border-slate-700">
+    <button type="button" class="w-11 bg-slate-800 text-xl text-white hover:bg-slate-700" onclick="const i=this.nextElementSibling; i.value=Math.max(1,+i.value-1)">−</button>
+    <input name="count" type="number" inputmode="numeric" min="1" max="{{ attendee.remaining_total }}" value="{{ count }}"
+           class="w-full min-w-0 bg-slate-950 py-3 text-center text-xl font-semibold text-white outline-none">
+    <button type="button" class="w-11 bg-slate-800 text-xl text-white hover:bg-slate-700" onclick="const i=this.previousElementSibling; i.value=Math.min({{ attendee.remaining_total }},+i.value+1)">+</button>
+  </div>
+  <p class="mb-3 text-sm text-slate-300">The guest gets the <b>shirt payment link</b> (WhatsApp message or QR to scan). Those tickets are
+    <b class="text-yellow-300">held</b> - they can't be sent - until an admin confirms the shirt. The other tickets are sent as usual.</p>
   <div class="grid grid-cols-2 gap-2">
     <button name="via" value="whatsapp" hx-disabled-elt="this" class="flex h-14 items-center justify-center gap-2 rounded-xl bg-green-500 font-bold text-green-950 hover:bg-green-400 disabled:opacity-50">
-      <i class="ph-fill ph-whatsapp-logo text-2xl"></i> WhatsApp</button>
+      <i class="ph-fill ph-whatsapp-logo text-2xl"></i> Send link</button>
     <button name="via" value="qr" class="flex h-14 items-center justify-center gap-2 rounded-xl bg-brand-500 font-bold text-white hover:bg-brand-400">
-      <i class="ph-bold ph-qr-code text-2xl"></i> QR</button>
+      <i class="ph-bold ph-qr-code text-2xl"></i> Scan QR</button>
   </div>
 </form>

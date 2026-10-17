@@ -89,3 +89,7 @@ REGISTRATION_BASE_URL = os.getenv("REGISTRATION_BASE_URL", "https://gate11.co.il
 REGISTRATION_PATH = "/admin/page.php?id=ticketReservations&gameId={game_id}"
 REGISTRATION_COOKIE = os.getenv("REGISTRATION_COOKIE", "")      # optional default; normally pasted on the Manage page
 MAX_REGISTRATION_BYTES = 5 * 1024 * 1024
+
+# "Shirt missing": the guest gets this payment link (Bit) and the tickets without a shirt are held until an admin confirms.
+SHIRT_PAYMENT_URL = os.getenv("SHIRT_PAYMENT_URL", "https://www.bitpay.co.il/app/me/6CF15931-43CC-3520-052B-D35F1D1F27C0D1DE").strip()
+SHIRT_MESSAGE = os.getenv("SHIRT_MESSAGE", "היי {name}, כדי שנוכל לשחרר {count} כרטיס/ים נוספים יש לרכוש חולצה בקישור: {link}")

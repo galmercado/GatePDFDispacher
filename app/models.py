@@ -69,7 +69,7 @@ class Attendee(Base):
     ticket_count: Mapped[int] = mapped_column(Integer, default=1)  # always adult_count + youth_count
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     external_ref: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)   # reservation id in the registration system
-    shirt_missing: Mapped[bool] = mapped_column(Boolean, default=False)   # came without the shirt: tickets handed out, not admitted until someone confirms
+    shirt_hold: Mapped[int] = mapped_column(Integer, default=0)   # tickets held back until an admin confirms the shirt was paid for
     admitted_adult: Mapped[int] = mapped_column(Integer, default=0)   # tickets let in so far (partial entry)
     admitted_youth: Mapped[int] = mapped_column(Integer, default=0)
     checked_in: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -103,6 +103,16 @@ class Attendee(Base):
     @property
     def partially_admitted(self) -> bool:
         return 0 < self.admitted_total < self.ticket_count
+
+    @property
+    def held(self) -> int:
+        """Tickets currently held back for a missing shirt (never more than what is still to come)."""
+        return max(0, min(self.shirt_hold or 0, self.remaining_total))
+
+    @property
+    def releasable(self) -> int:
+        """Tickets that may be handed out right now."""
+        return self.remaining_total - self.held
 
 
 class Ticket(Base):

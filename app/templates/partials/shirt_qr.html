@@ -1,0 +1,14 @@
+<div class="mb-3 flex items-start justify-between gap-3">
+  <div class="min-w-0">
+    <h2 class="truncate text-lg font-semibold text-white">{{ attendee.name }}</h2>
+    <p class="text-sm text-slate-400">Scan to pay for the shirt</p>
+    <p class="mt-0.5 text-xs text-yellow-300">{{ count }} ticket{{ 's' if count != 1 }} held until an admin confirms.</p>
+  </div>
+  <button type="button" onclick="document.getElementById('qr-modal').close()" class="text-slate-400 hover:text-white" aria-label="Close"><i class="ph ph-x text-xl"></i></button>
+</div>
+<div class="mb-3 rounded-2xl bg-white p-3 text-center">
+  <img src="{{ svg }}" alt="QR code of the shirt payment link" class="mx-auto w-full max-w-[260px]">
+  <a href="{{ url }}" target="_blank" rel="noopener" class="mt-2 inline-flex items-center gap-1 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white"><i class="ph ph-arrow-square-out"></i> Open link</a>
+  <p class="mt-1 break-all text-[11px] text-slate-500">{{ url }}</p>
+</div>
+{% with attendees=[attendee], oob=True, q="x" %}{% include "partials/attendee_rows.html" %}{% endwith %}

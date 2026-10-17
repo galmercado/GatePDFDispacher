@@ -2682,47 +2682,64 @@ def test_ticket_files_are_deleted_a_month_after_the_event(client, admin, tmp_pat
 
 # --------------------------------------------------------------------------- shirt missing
 
-def test_shirt_missing_sends_flags_locks_and_admits_later(admin, doorman, event_id, wa):
-    att = party(admin, event_id)                                   # 3 tickets
+@pytest.fixture()
+def shirt_texts(monkeypatch):
+    sent = []
+
+    async def fake_text(phone, text, instance=None, client=None, typing=True, _retry=True):
+        sent.append((phone, text))
+
+    monkeypatch.setattr("app.main.send_whatsapp_text", fake_text)
+    return sent
+
+
+def test_shirt_missing_sends_the_link_and_holds_those_tickets_until_an_admin_confirms(admin, doorman, event_id, wa, shirt_texts):
+    att = party(admin, event_id)                                   # 2 adults + 1 youth = 3 tickets
     card = doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
-    assert "Shirt missing" in card and f"/attendees/{att}/shirt-form" in card
+    assert f"/attendees/{att}/shirt-form" in card and "Shirt missing" in card
     form = doorman.get(f"/attendees/{att}/shirt-form")
-    assert form.status_code == 200 and "WhatsApp" in form.text and "QR" in form.text
-    r = doorman.post(f"/attendees/{att}/shirt-missing", data={"via": "whatsapp"})
-    assert 'hx-swap-oob="true"' in r.text and "ring-yellow-400/60" in r.text and "flagged" in r.headers["HX-Trigger"]
-    assert wa["sent"] == ["MSG1", "MSG2", "MSG3"]
-    assert admitted(att) == (0, 0, False, [True, True, True])      # sent, but NOT admitted
+    assert form.status_code == 200 and "Send link" in form.text and "Scan QR" in form.text
+    # one ticket has no shirt: the guest gets the payment link
+    r = doorman.post(f"/attendees/{att}/shirt-missing", data={"count": "1", "via": "whatsapp"})
+    assert 'hx-swap-oob="true"' in r.text and "ring-yellow-400/60" in r.text and "Shirt missing ×1" in r.text
+    assert len(shirt_texts) == 1 and config.SHIRT_PAYMENT_URL in shirt_texts[0][1] and shirt_texts[0][0].isdigit()
+    assert admitted(att) == (0, 0, False, [False, False, False]) and wa["sent"] == []     # nothing sent yet
+    # the normal button now hands out only 2 of the 3 tickets
+    r = doorman.post(f"/attendees/{att}/whatsapp")
+    assert "Sent 2 tickets" in r.headers["HX-Trigger"] and wa["sent"] == ["MSG1", "MSG2"]
+    assert admitted(att) == (2, 0, True, [True, True, False])
+    # nothing more can go out while the shirt is unconfirmed - by any route
+    assert "held" in doorman.post(f"/attendees/{att}/whatsapp").headers["HX-Trigger"]
+    assert "held" in doorman.post(f"/attendees/{att}/qr").headers["HX-Trigger"]
+    r = doorman.post(f"/attendees/{att}/partial", data={"adult": "0", "youth": "1", "via": "whatsapp"})
+    assert "held until an admin" in r.text and wa["sent"] == ["MSG1", "MSG2"]
+    assert admitted(att) == (2, 0, True, [True, True, False])
+    # only an admin can release
+    assert doorman.post(f"/attendees/{att}/shirt-release").status_code in (401, 403)
+    assert admitted(att)[3] == [True, True, False]
+    admin.post(f"/attendees/{att}/shirt-release")
     card = doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
-    assert "Admitted</button>" in card and "/whatsapp" not in card and "/partial-form" not in card and "Clear flag" in card
-    # locked: the normal actions are refused while flagged
-    assert "shirt missing" in doorman.post(f"/attendees/{att}/whatsapp").headers["HX-Trigger"]
-    assert doorman.get(f"/attendees/{att}/partial-form").headers["HX-Trigger"].count("shirt missing") == 1
-    assert doorman.post(f"/attendees/{att}/qr").status_code == 200 and admitted(att)[2] is False
-    assert wa["sent"] == ["MSG1", "MSG2", "MSG3"]
-    # someone presses Admitted: flag gone, everyone counted
-    doorman.post(f"/attendees/{att}/toggle")
-    assert admitted(att) == (2, 1, True, [True, True, True])
-    card = doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
-    assert "ring-yellow-400/60" not in card and "Shirt missing" not in card
+    assert "ring-yellow-400/60" not in card
+    doorman.post(f"/attendees/{att}/whatsapp")
+    assert wa["sent"] == ["MSG1", "MSG2", "MSG3"] and admitted(att) == (2, 1, True, [True, True, True])
 
 
-def test_shirt_missing_by_qr_and_clear_flag(admin, doorman, event_id, wa):
+def test_shirt_missing_by_qr_shows_the_payment_qr_and_limits_the_zip(admin, doorman, event_id, wa):
     att = party(admin, event_id)
-    r = doorman.post(f"/attendees/{att}/shirt-missing", data={"via": "qr"})
-    assert "tickets.zip" in r.text and "Shirt missing" in r.text and "ring-yellow-400/60" in r.text
-    assert admitted(att) == (0, 0, False, [True, True, True])
-    doorman.post(f"/attendees/{att}/shirt-clear")
-    assert "ring-yellow-400/60" not in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
-    assert admitted(att)[2] is False
+    r = doorman.post(f"/attendees/{att}/shirt-missing", data={"count": "2", "via": "qr"})
+    assert "Scan to pay" in r.text and config.SHIRT_PAYMENT_URL in r.text and "ring-yellow-400/60" in r.text
+    r = doorman.post(f"/attendees/{att}/qr")                       # 1 ticket can go out now, as one ZIP
+    assert "1 ticket in one ZIP" in r.text and admitted(att)[3] == [True, False, False]
+    assert doorman.post(f"/attendees/{att}/shirt-missing", data={"count": "9", "via": "qr"}).text.count("Choose between") == 1
 
 
-def test_shirt_missing_whatsapp_failure_does_not_flag(admin, doorman, event_id, monkeypatch):
+def test_shirt_missing_whatsapp_failure_holds_nothing(admin, doorman, event_id, monkeypatch):
     att = party(admin, event_id)
 
     async def boom(*a, **k):
         raise services.WhatsAppError("gateway down")
 
-    monkeypatch.setattr("app.main.send_tickets", boom)
-    r = doorman.post(f"/attendees/{att}/shirt-missing", data={"via": "whatsapp"})
+    monkeypatch.setattr("app.main.send_whatsapp_text", boom)
+    r = doorman.post(f"/attendees/{att}/shirt-missing", data={"count": "1", "via": "whatsapp"})
     assert "gateway down" in r.text
     assert "ring-yellow-400/60" not in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text

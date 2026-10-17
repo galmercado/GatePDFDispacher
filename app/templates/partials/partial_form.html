@@ -7,7 +7,7 @@
 </div>
 <div class="mb-3 rounded-xl bg-slate-950 p-3 text-sm text-slate-300" dir="rtl">
   הזמנה: מבוגר {{ attendee.adult_count }} · נוער {{ attendee.youth_count }}<br>
-  כבר נכנסו: <b>{{ attendee.admitted_total }}</b> · נשארו: <b class="text-amber-300">{{ attendee.remaining_total }}</b>
+  כבר נכנסו: <b>{{ attendee.admitted_total }}</b> · נשארו: <b class="text-amber-300">{{ attendee.remaining_total }}</b>{% if attendee.held %} · <span class="text-yellow-300">מוחזקים (חולצה): {{ attendee.held }}</span>{% endif %}
 </div>
 {% if errors %}<div class="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">
   <ul class="list-inside list-disc">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
@@ -29,7 +29,7 @@
     {% endfor %}
   </div>
   <button type="button" class="mb-4 w-full text-center text-xs text-brand-400 underline"
-          onclick="const f=this.closest('form'); f.adult.value={{ attendee.remaining_adult }}; f.youth.value={{ attendee.remaining_youth }}">Select all remaining ({{ attendee.remaining_total }})</button>
+          onclick="const f=this.closest('form'); f.adult.value={{ all_adult }}; f.youth.value={{ all_youth }}">Select all available ({{ attendee.releasable }})</button>
   <div class="grid grid-cols-2 gap-2">
     <button name="via" value="whatsapp" class="flex h-14 items-center justify-center gap-2 rounded-xl bg-green-500 font-bold text-green-950 hover:bg-green-400">
       <i class="ph-fill ph-whatsapp-logo text-2xl"></i> WhatsApp</button>
