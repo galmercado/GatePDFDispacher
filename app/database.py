@@ -75,6 +75,12 @@ def migrate(bind: Engine) -> None:
                 conn.execute(text("ALTER TABLE whatsapp_lines ADD COLUMN profile_set BOOLEAN NOT NULL DEFAULT 0"))
             if "profile_error" not in line_cols:
                 conn.execute(text("ALTER TABLE whatsapp_lines ADD COLUMN profile_error TEXT"))
+    if "tickets" in names and "send_failed" not in {c["name"] for c in insp.get_columns("tickets")}:
+        with bind.begin() as conn:
+            conn.execute(text("ALTER TABLE tickets ADD COLUMN send_failed BOOLEAN NOT NULL DEFAULT 0"))
+    if "whatsapp_lines" in names and "fail_streak" not in {c["name"] for c in insp.get_columns("whatsapp_lines")}:
+        with bind.begin() as conn:
+            conn.execute(text("ALTER TABLE whatsapp_lines ADD COLUMN fail_streak INTEGER NOT NULL DEFAULT 0"))
     if "attendees" in names and "shirt_hold" not in {c["name"] for c in insp.get_columns("attendees")}:
         with bind.begin() as conn:
             conn.execute(text("ALTER TABLE attendees ADD COLUMN shirt_hold INTEGER NOT NULL DEFAULT 0"))

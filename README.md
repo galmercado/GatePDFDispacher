@@ -151,6 +151,15 @@ A re-encoded image is used only if it is really smaller. Tests decode the QR cod
 **Retention.** Ticket PDFs are deleted `TICKET_RETENTION_DAYS` (default 30) after the event ends, checked every 10 minutes
 (Settings → Cleanup; 0 keeps them). Guests and attendance stay; the tickets lose their file, so old download links stop working.
 
+### Delivery reports (why "sent" is not always delivered)
+
+Evolution answers HTTP 201 as soon as it hands a message to WhatsApp; WhatsApp may refuse it a moment later (status `ERROR`, code `463`)
+and the guest never receives anything. Evolution therefore reports delivery status to the app (`/webhooks/evolution`, set up in
+`docker-compose.yml`; it needs `DATABASE_SAVE_DATA_NEW_MESSAGE=true` because Evolution skips status updates for messages it did not store).
+The app then marks a ticket **"WhatsApp did not deliver"** on the guest's card (use *Resend sent*; another line is used automatically), and a line
+whose last `LINE_ERROR_STREAK` (2) messages were refused is switched to *not functioning*. After updating, recreate Evolution:
+`docker compose --profile prod up -d --force-recreate evolution-api app`.
+
 ### A line stuck on "connecting" / "conflict - replaced" loop
 
 If the Evolution log shows `CONNECTED TO WHATSAPP` twice per second together with `stream:error conflict type="replaced"`, two sockets

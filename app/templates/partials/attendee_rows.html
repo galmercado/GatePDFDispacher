@@ -24,6 +24,9 @@
       {% else %}<i class="ph ph-hourglass-medium"></i> Waiting{% endif %}
     </span>
   </div>
+  {% if a.tickets|selectattr('send_failed')|list %}
+  <p class="mt-2 rounded-lg bg-rose-500/15 px-2.5 py-1.5 text-xs font-medium text-rose-200"><i class="ph-fill ph-warning"></i> WhatsApp did not deliver {{ a.tickets|selectattr('send_failed')|list|length }} ticket message(s) - use <b>Resend sent</b> (another number is used automatically) or the QR.</p>
+  {% endif %}
   {% if a.partially_admitted %}<p class="mt-2 text-xs text-amber-300/90" dir="rtl">נכנסו {{ a.admitted_total }} מתוך {{ a.ticket_count }} · נשארו {{ a.remaining_total }}</p>
   {% elif a.checked_in and a.checked_in_at %}<p class="mt-2 text-xs text-emerald-400/70">Checked in {{ a.checked_in_at.strftime('%H:%M') }} UTC</p>{% endif %}
 

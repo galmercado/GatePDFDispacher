@@ -1149,6 +1149,7 @@ async def send_tickets(db: Session, attendee: Attendee, event: Event, tickets: l
                                    remote_jid=ref.remote_jid, message_id=ref.message_id,
                                    delete_at=schedule_delete_at(event)))
             ticket.delivered_at = utcnow()
+            ticket.send_failed = False
             db.commit()
             sent.append(ticket)
     except WhatsAppError:
@@ -1585,6 +1586,28 @@ async def stray_instances(db: Session) -> list[dict]:
     """Instances that exist in Evolution but belong to no line here (leftovers, double clicks)."""
     known = {n for (n,) in db.query(WhatsAppLine.instance_name)}
     return [i for i in await evolution_list_instances() if i["name"] not in known]
+
+
+@app.post("/webhooks/evolution", include_in_schema=False)
+async def evolution_webhook(request: Request, token: str = "", db: Session = Depends(get_db)):
+    """Delivery reports (messages.update) pushed by Evolution: tells us when WhatsApp refused a message that Evolution had
+    accepted. Only Evolution (inside the Docker network) knows the token."""
+    if not token or not secrets.compare_digest(token.encode(), config.EVOLUTION_WEBHOOK_TOKEN.encode()):
+        return JSONResponse({"ok": False}, status_code=401)
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False}, status_code=400)
+    if str(body.get("event", "")).lower().replace("_", ".") != "messages.update":
+        return {"ok": True, "ignored": True}
+    items = body.get("data")
+    results = []
+    for item in items if isinstance(items, list) else [items]:
+        if not isinstance(item, dict) or item.get("fromMe") is False:
+            continue
+        results.append(linesmod.apply_delivery_update(db, str(body.get("instance") or body.get("instanceName") or ""),
+                                                      str(item.get("keyId") or ""), str(item.get("status") or "")))
+    return {"ok": True, "results": results}
 
 
 @app.get("/lines", response_class=HTMLResponse)

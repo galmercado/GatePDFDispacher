@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from . import config
 from .database import SessionLocal
 from .messages import line_chat_text, line_test_text
-from .models import AppSetting, Event, WhatsAppLine, utcnow
+from .models import AppSetting, Event, SentMessage, Ticket, WhatsAppLine, utcnow
 from .services import (
     SentRef, WhatsAppError, evolution_numbers_exist, evolution_owner_number, evolution_set_profile, evolution_state, send_whatsapp_text,
 )
@@ -327,6 +327,40 @@ async def pretest_loop() -> None:
         await asyncio.sleep(600)
 
 
+def apply_delivery_update(db: Session, instance: str, key_id: str, status: str) -> str:
+    """Handle one delivery report from Evolution (messages.update). Returns what happened, for logging/tests.
+
+    ERROR            -> the ticket (if it was one) is flagged 'not delivered'; after LINE_ERROR_STREAK in a row the line is
+                        marked not functioning so the next send uses another number.
+    DELIVERY_ACK/READ/PLAYED -> the message arrived: the line's failure streak starts over and the flag is cleared."""
+    status = str(status or "").upper()
+    line = db.query(WhatsAppLine).filter(WhatsAppLine.instance_name == instance).first()
+    msg = db.query(SentMessage).filter(SentMessage.message_id == key_id).first() if key_id else None
+    ticket = db.get(Ticket, msg.ticket_id) if msg is not None and msg.ticket_id else None
+    if status == "ERROR":
+        if ticket is not None:
+            ticket.send_failed = True
+        if line is None:
+            db.commit()
+            return "error (unknown line)"
+        line.fail_streak = (line.fail_streak or 0) + 1
+        if line.fail_streak >= config.LINE_ERROR_STREAK and line.status == "active":
+            mark_failed(db, line, WhatsAppError(
+                f"WhatsApp refused {line.fail_streak} messages in a row (delivery status ERROR, usually code 463): "
+                "this number cannot deliver right now."))
+            return "line failed"
+        db.commit()
+        return "error counted"
+    if status in ("DELIVERY_ACK", "READ", "PLAYED"):
+        if ticket is not None and ticket.send_failed:
+            ticket.send_failed = False
+        if line is not None and line.fail_streak:
+            line.fail_streak = 0
+        db.commit()
+        return "delivered"
+    return "ignored"
+
+
 def error_hint(text: str) -> str:
     """Plain-language advice for the errors Evolution/WhatsApp typically produce."""
     t = (text or "").lower()
@@ -336,6 +370,10 @@ def error_hint(text: str) -> str:
                 "instances for the same login) and they keep kicking each other out. Make sure only ONE Evolution stack runs, then "
                 "`docker compose restart evolution-api`; if it keeps looping, remove this line and link the phone again (also remove old "
                 "\"Evolution API\" entries under WhatsApp > Linked devices).")
+    if "463" in t or "refused" in t and "messages in a row" in t:
+        return ("WhatsApp accepts the message but then refuses to deliver it (status ERROR / code 463). This is decided by WhatsApp for "
+                "this number: typically a new or little-used number, or one that is messaging people who never wrote to it. Use another "
+                "line, let this one warm up (chat normally from the phone for a few days), or relink it.")
     if "rate" in t and "limit" in t or "overlimit" in t or "429" in t:
         return "WhatsApp is rate-limiting this number: let it rest, lower its daily limit and raise the pause between messages."
     if "unauthorized" in t or "401" in t:

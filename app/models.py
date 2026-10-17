@@ -127,6 +127,7 @@ class Ticket(Base):
     page_number: Mapped[int] = mapped_column(Integer)
     file_path: Mapped[str] = mapped_column(String(512))
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # sent via WhatsApp / shown as QR
+    send_failed: Mapped[bool] = mapped_column(Boolean, default=False)   # WhatsApp reported that the message was not delivered
     claim_token: Mapped[str] = mapped_column(
         String(64), unique=True, index=True, default=lambda: uuid.uuid4().hex
     )
@@ -221,6 +222,7 @@ class WhatsAppLine(Base):
     failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     profile_set: Mapped[bool] = mapped_column(Boolean, default=False)          # name + picture applied to the WhatsApp account
     profile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fail_streak: Mapped[int] = mapped_column(Integer, default=0)               # consecutive messages WhatsApp refused to deliver
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 

@@ -93,3 +93,8 @@ MAX_REGISTRATION_BYTES = 5 * 1024 * 1024
 # "Shirt missing": the guest gets this payment link (Bit) and the tickets without a shirt are held until an admin confirms.
 SHIRT_PAYMENT_URL = os.getenv("SHIRT_PAYMENT_URL", "https://www.bitpay.co.il/app/me/6CF15931-43CC-3520-052B-D35F1D1F27C0D1DE").strip()
 SHIRT_MESSAGE = os.getenv("SHIRT_MESSAGE", "היי {name}, כדי שנוכל לשחרר {count} כרטיס/ים נוספים יש לרכוש חולצה בקישור: {link}")
+
+# Delivery reports from Evolution (messages.update webhook): a line whose last N messages were all refused by WhatsApp
+# (status ERROR, e.g. code 463) is switched to "not functioning" so the next send uses another line.
+LINE_ERROR_STREAK = int(os.getenv("LINE_ERROR_STREAK", "2"))
+EVOLUTION_WEBHOOK_TOKEN = os.getenv("EVOLUTION_WEBHOOK_TOKEN", "").strip() or EVOLUTION_API_KEY

@@ -2866,3 +2866,41 @@ def test_reset_session_recreates_the_instance(admin, doorman, lines3, monkeypatc
     assert ops == [("delete", name), ("create", name)] and "scan the code ONCE" in r.text
     with SessionLocal() as db:
         assert db.get(WhatsAppLine, lid).status == "pending"
+
+
+def test_delivery_webhook_flags_undelivered_tickets_and_fails_a_line_after_repeated_refusals(client, admin, doorman, event_id, wa, monkeypatch):
+    from app.models import SentMessage, WhatsAppLine
+    monkeypatch.setattr(config, "EVOLUTION_WEBHOOK_TOKEN", "hook-secret")
+    att = party(admin, event_id)
+    doorman.post(f"/attendees/{att}/partial", data={"adult": "2", "youth": "0", "via": "whatsapp"})
+    with SessionLocal() as db:
+        msgs = db.query(SentMessage).filter_by(attendee_id=att).order_by(SentMessage.id).all()
+        instance = db.get(WhatsAppLine, msgs[0].line_id).instance_name
+        ids = [m.message_id for m in msgs]
+        line_id = msgs[0].line_id
+        db.get(WhatsAppLine, line_id).fail_streak = 0
+        db.commit()
+
+    def report(key_id, status, token="hook-secret", event="messages.update"):
+        return client.post(f"/webhooks/evolution?token={token}", json={
+            "event": event, "instance": instance, "data": {"keyId": key_id, "fromMe": True, "status": status}})
+
+    assert report(ids[0], "ERROR", token="wrong").status_code == 401
+    assert report(ids[0], "ERROR", event="connection.update").json()["ignored"] is True
+    assert report(ids[0], "ERROR").json()["results"] == ["error counted"]
+    card = doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    assert "did not deliver 1 ticket message" in card
+    with SessionLocal() as db:
+        assert db.get(WhatsAppLine, line_id).status == "active"
+    assert report(ids[1], "ERROR").json()["results"] == ["line failed"]               # second refusal in a row
+    with SessionLocal() as db:
+        line = db.get(WhatsAppLine, line_id)
+        assert line.status == "failed" and "refused 2 messages" in line.last_error
+        line.status, line.fail_streak = "active", 1
+        db.commit()
+    assert report(ids[0], "DELIVERY_ACK").json()["results"] == ["delivered"]          # arrived after all: streak and flag reset
+    with SessionLocal() as db:
+        assert db.get(WhatsAppLine, line_id).fail_streak == 0
+    assert "did not deliver 1 ticket" in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text      # the other one is still flagged
+    report(ids[1], "READ")
+    assert "did not deliver" not in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text

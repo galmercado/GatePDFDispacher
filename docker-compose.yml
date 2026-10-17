@@ -14,6 +14,7 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       EVOLUTION_API_URL: http://evolution-api:8080
       EVOLUTION_API_KEY: ${EVOLUTION_API_KEY:?set EVOLUTION_API_KEY in .env}
+      LINE_ERROR_STREAK: ${LINE_ERROR_STREAK:-2}
       EVOLUTION_INSTANCE: ${EVOLUTION_INSTANCE:-event-door}
       DEFAULT_COUNTRY_CODE: ${DEFAULT_COUNTRY_CODE:-972}
       WHATSAPP_MIN_INTERVAL: ${WHATSAPP_MIN_INTERVAL:-3.0}
@@ -53,7 +54,13 @@ services:
       DATABASE_CONNECTION_URI: postgresql://evolution:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/evolution
       DATABASE_CONNECTION_CLIENT_NAME: gate
       DATABASE_SAVE_DATA_INSTANCE: "true"
-      DATABASE_SAVE_DATA_NEW_MESSAGE: "false"
+      # Messages must be stored for Evolution to report their delivery status (it skips status updates for unknown messages).
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      # Delivery reports go to our app: it learns when WhatsApp refuses a message (status ERROR / code 463).
+      WEBHOOK_GLOBAL_ENABLED: "true"
+      WEBHOOK_GLOBAL_URL: http://app:8000/webhooks/evolution?token=${EVOLUTION_API_KEY}
+      WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: "false"
+      WEBHOOK_EVENTS_MESSAGES_UPDATE: "true"
       DATABASE_SAVE_MESSAGE_UPDATE: "false"
       DATABASE_SAVE_DATA_CONTACTS: "false"
       DATABASE_SAVE_DATA_CHATS: "false"
