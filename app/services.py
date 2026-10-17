@@ -986,3 +986,36 @@ def parse_member_file(filename: str, content: bytes) -> list[tuple[str, str]]:
     if not pairs:
         raise ImportValidationError(["The file contains no rows"])
     return pairs
+
+
+# --------------------------------------------------------------------------- WhatsApp account of a line
+
+async def evolution_owner_number(name: str, client: httpx.AsyncClient | None = None) -> str | None:
+    """The phone number the instance is linked to (digits), or None if unknown / not linked yet."""
+    try:
+        resp = await _gateway_call("GET", f"/instance/fetchInstances?instanceName={name}", None, client, instance="", throttled=False)
+        body = resp.json()
+    except (WhatsAppError, ValueError):
+        return None
+    item = (body[0] if isinstance(body, list) and body else body) or {}
+    item = item.get("instance", item) if isinstance(item, dict) else {}
+    raw = item.get("ownerJid") or item.get("owner") or item.get("number") or ""
+    digits = re.sub(r"\D", "", str(raw).split("@")[0].split(":")[0])
+    return digits if 8 <= len(digits) <= 15 else None
+
+
+async def evolution_set_profile(name: str, display_name: str, picture_b64: str | None,
+                                client: httpx.AsyncClient | None = None) -> list[str]:
+    """Set the account's WhatsApp profile name and picture. Returns a list of problems (empty = all applied)."""
+    problems: list[str] = []
+    try:
+        await _gateway_call("POST", "/chat/updateProfileName", {"name": display_name}, client, name, throttled=False)
+    except WhatsAppError as exc:
+        problems.append(f"name: {exc}")
+    if picture_b64:
+        await asyncio.sleep(random.uniform(2.0, 6.0))
+        try:
+            await _gateway_call("POST", "/chat/updateProfilePicture", {"picture": picture_b64}, client, name, throttled=False)
+        except WhatsAppError as exc:
+            problems.append(f"picture: {exc}")
+    return problems

@@ -19,12 +19,13 @@
 
 <section class="mb-4 grid gap-3 rounded-2xl border border-slate-800 bg-slate-900 p-4 sm:grid-cols-2">
   <form method="post" action="/lines/settings">
-    <label class="{{ label }}" for="tn">Test number (receives the pre-event check)</label>
+    <label class="{{ label }}" for="tn">Backup test number (only used when there is no other connected line)</label>
     <div class="flex gap-2"><input id="tn" name="test_number" value="{{ test_number }}" inputmode="tel" placeholder="052-1234567" class="{{ field }}">
       <button class="rounded-xl bg-slate-800 px-4 text-sm font-semibold text-white hover:bg-slate-700">Save</button></div>
-    <p class="mt-1 text-xs text-slate-500">{% if not test_number %}<span class="text-amber-300">Not set - tests only check the connection, no test message is sent.</span>{% else %}24 h before each event every line sends a short test message here.{% endif %}</p>
+    <p class="mt-1 text-xs text-slate-500">Tests are a short chat <b>between your own lines</b> (each messages the next connected one, which replies), so every number shows normal activity. {% if not test_number %}No backup number set - a single connected line is only checked for its connection.{% else %}A lone line writes to this number instead.{% endif %}</p>
   </form>
   <div class="flex flex-wrap items-end gap-2">
+    <form method="post" action="/lines/profile-all" onsubmit="return confirm('Set the profile name and picture on every connected line?')"><button class="flex items-center gap-2 rounded-xl border border-slate-700 px-4 py-2.5 text-sm font-medium text-slate-200 hover:bg-slate-800"><i class="ph ph-identification-badge"></i> Apply profile to all connected lines</button></form>
     <form method="post" action="/lines/test-all"><button class="flex items-center gap-2 rounded-xl bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-heartbeat"></i> Test all lines now</button></form>
     <form method="post" action="/lines/bulk" onsubmit="return confirm('Create lines until there are {{ target }}? Each one then needs its QR scanned.')">
       <button class="flex items-center gap-2 rounded-xl border border-slate-700 px-4 py-2.5 text-sm font-medium text-slate-200 hover:bg-slate-800"><i class="ph ph-stack-plus"></i> Top up to {{ target }} lines</button></form>
@@ -58,11 +59,12 @@
     <div>Today: <b class="text-slate-200">{{ l.today_count }}/{{ l.daily_cap }}</b></div>
     <div>Last test: <b class="{{ 'text-emerald-300' if l.last_test_ok else ('text-rose-300' if l.last_test_ok is not none else 'text-slate-200') }}">{% if l.last_test_at %}{{ l.last_test_at.strftime('%d/%m %H:%M') }} UTC · {{ 'OK' if l.last_test_ok else 'failed' }}{% else %}never{% endif %}</b></div>
     <div>Last used: <b class="text-slate-200">{{ l.last_used_at.strftime('%d/%m %H:%M') + ' UTC' if l.last_used_at else '-' }}</b></div>
+    <div class="col-span-2">Profile: <b class="{{ 'text-emerald-300' if l.profile_set else 'text-slate-200' }}">{{ 'name + picture set' if l.profile_set else 'not set yet' }}</b>{% if l.profile_error %} <span class="text-rose-300">· {{ l.profile_error }}</span>{% endif %}</div>
   </dl>
   {% if l.last_error %}<p class="mt-2 rounded-lg bg-rose-500/10 px-2 py-1.5 text-xs text-rose-200">{{ l.last_error }}</p>{% endif %}
   <div class="mt-3 flex flex-wrap gap-2 text-xs">
     <button hx-post="/lines/{{ l.id }}/connect" hx-target="#line-content" hx-swap="innerHTML" class="flex items-center gap-1 rounded-lg bg-brand-500 px-3 py-1.5 font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-qr-code"></i> Connect / QR</button>
-    {% for action, text_, icon in [('test', 'Test', 'ph-heartbeat'), ('refresh', 'Refresh', 'ph-arrows-clockwise')] %}
+    {% for action, text_, icon in [('test', 'Test', 'ph-heartbeat'), ('refresh', 'Refresh', 'ph-arrows-clockwise'), ('profile', 'Apply profile', 'ph-identification-badge')] %}
     <form method="post" action="/lines/{{ l.id }}/{{ action }}"><button class="flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 hover:bg-slate-800"><i class="ph {{ icon }}"></i> {{ text_ }}</button></form>
     {% endfor %}
     {% if l.status == 'failed' %}<form method="post" action="/lines/{{ l.id }}/reset"><button class="rounded-lg border border-emerald-500/40 px-3 py-1.5 text-emerald-300 hover:bg-emerald-500/10">Mark as working</button></form>{% endif %}

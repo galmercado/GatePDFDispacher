@@ -207,6 +207,8 @@ class WhatsAppLine(Base):
     last_test_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    profile_set: Mapped[bool] = mapped_column(Boolean, default=False)          # name + picture applied to the WhatsApp account
+    profile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 

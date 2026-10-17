@@ -87,3 +87,22 @@ def line_test_text(label: str, rng: random.Random | None = None) -> str:
     rng = rng or random
     return rng.choice(["Line check", "Test message", "Checking in", "Quick test"]) + f" - {label} " + \
         rng.choice(["✓", "OK", "👍", ""]) + f" {rng.randint(1000, 9999)}"
+
+
+_CHAT = {
+    "en": {"hello": ["Hey", "Hi", "Hello", "Hey there", "Hi!"],
+           "tail": ["how's it going?", "all good?", "just checking in", "quick check", "anything new?", ""],
+           "reply": ["👍", "all good", "got it, thanks", "yep", "received 🙂", "all good here"]},
+    "he": {"hello": ["היי", "שלום", "הי", "אהלן", "היי!"],
+           "tail": ["מה נשמע?", "הכל טוב?", "בדיקה קטנה", "רק בודקים", "יש חדש?", ""],
+           "reply": ["👍", "הכל טוב", "קיבלתי, תודה", "כן", "התקבל 🙂", "הכל בסדר פה"]},
+}
+
+
+def line_chat_text(reply: bool = False, rng: random.Random | None = None) -> str:
+    """Short, ordinary-looking message between two of our own numbers (line health test)."""
+    rng = rng or random
+    parts = _CHAT["he" if config.WHATSAPP_MESSAGE_LANG == "he" else "en"]
+    if reply:
+        return rng.choice(parts["reply"])
+    return (rng.choice(parts["hello"]) + rng.choice([" ", ", "]) + rng.choice(parts["tail"])).strip(" ,")

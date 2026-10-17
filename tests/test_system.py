@@ -2097,3 +2097,241 @@ def test_event_form_lists_and_phone_defaults_are_editable(admin):
     assert "Home FC vs. Team B" in admin.get("/events").text
     admin.post("/settings/site/reset")
     assert data.HOME_TEAM == "מכבי תל אביב" and "Court 2" not in data.ARENAS and services.normalize_phone("0521234567") == "972521234567"
+
+
+# ----------------------------------------------------------------- lines chat with each other, WhatsApp profile
+
+PROFILE_CALLS = []
+OWNER_NUMBERS = {}
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gateway(monkeypatch):
+    """Tests never reach a real Evolution: owner-number lookups and profile updates are recorded stubs."""
+    PROFILE_CALLS.clear()
+    OWNER_NUMBERS.clear()
+
+    async def owner(name, client=None):
+        return OWNER_NUMBERS.get(name)
+
+    async def profile(name, display_name, picture_b64, client=None):
+        PROFILE_CALLS.append((name, display_name, picture_b64))
+        return []
+
+    for mod in ("app.lines", "app.main"):
+        monkeypatch.setattr(f"{mod}.evolution_owner_number", owner)
+        monkeypatch.setattr(f"{mod}.evolution_set_profile", profile)
+    yield
+
+
+def line_rows():
+    from app.models import WhatsAppLine
+    with SessionLocal() as db:
+        return {l.label: l for l in db.query(WhatsAppLine).order_by(WhatsAppLine.id)}
+
+
+def test_lines_test_each_other_in_a_ring_and_reply(lines3, monkeypatch):
+    import asyncio
+    from app.lines import run_line_tests, set_setting
+    from app.messages import _CHAT
+    monkeypatch.setattr(config, "LINE_TEST_GAP", (0.0, 0.0))
+    OWNER_NUMBERS.update({"inst-1": "972501000001", "inst-2": "972501000002", "inst-3": "972501000003"})
+    sent = []
+
+    async def state(name, client=None):
+        return "close" if name == "inst-3" else "open"
+
+    async def text(number, body, instance=None, client=None):
+        sent.append((instance, number, body))
+
+    async def go():
+        with SessionLocal() as db:
+            set_setting(db, "test_number", "972509999999")              # must NOT be used while lines can talk to each other
+            return await run_line_tests(db, state_fn=state, text_fn=text)
+
+    assert asyncio.run(go()) == {"ok": 2, "bad": 1}
+    assert [(i, n) for i, n, _ in sent] == [("inst-1", "972501000002"), ("inst-2", "972501000001"),      # L1 -> L2, L2 replies
+                                            ("inst-2", "972501000001"), ("inst-1", "972501000002")]      # L2 -> L1, L1 replies
+    assert all(n != "972509999999" for _, n, _ in sent)
+    chat = {w for lang in _CHAT.values() for w in lang["reply"]}
+    assert sent[1][2] in chat and sent[3][2] in chat and "Line check" not in sent[0][2]
+    assert line_status() == {"L1": "active", "L2": "active", "L3": "failed"}
+    assert line_rows()["L1"].phone == "972501000001"                       # phone numbers are learned from Evolution
+
+
+def test_a_lone_connected_line_falls_back_to_the_test_number(lines3, monkeypatch):
+    import asyncio
+    from app.lines import run_line_tests, set_setting
+    monkeypatch.setattr(config, "LINE_TEST_GAP", (0.0, 0.0))
+    OWNER_NUMBERS.update({"inst-1": "972501000001"})
+    sent = []
+
+    async def state(name, client=None):
+        return "open" if name == "inst-1" else "close"
+
+    async def text(number, body, instance=None, client=None):
+        sent.append((instance, number))
+
+    async def go():
+        with SessionLocal() as db:
+            set_setting(db, "test_number", "972509999999")
+            return await run_line_tests(db, state_fn=state, text_fn=text)
+
+    assert asyncio.run(go()) == {"ok": 1, "bad": 2} and sent == [("inst-1", "972509999999")]
+
+
+def test_single_line_test_uses_its_neighbour(admin, lines3, monkeypatch):
+    import asyncio
+    from app.lines import test_one
+    monkeypatch.setattr(config, "LINE_TEST_GAP", (0.0, 0.0))
+    OWNER_NUMBERS.update({"inst-1": "972501000001", "inst-2": "972501000002"})
+    sent = []
+
+    async def state(name, client=None):
+        return "open"
+
+    async def text(number, body, instance=None, client=None):
+        sent.append((instance, number))
+
+    async def go():
+        with SessionLocal() as db:
+            line = db.query(__import__("app.models", fromlist=["WhatsAppLine"]).WhatsAppLine).filter_by(label="L2").one()
+            return await test_one(db, line, state_fn=state, text_fn=text)
+
+    assert asyncio.run(go()) is True
+    assert sent[0] == ("inst-2", "972501000003") or sent[0][0] == "inst-2"      # L2 writes to its ring neighbour, which replies
+
+
+def test_profile_is_set_once_when_a_line_connects(lines3):
+    import asyncio
+    from app.lines import on_connected
+    from app.models import WhatsAppLine
+
+    async def go():
+        with SessionLocal() as db:
+            line = db.query(WhatsAppLine).filter_by(label="L1").one()
+            line.connection = "open"
+            await on_connected(db, line)
+            await on_connected(db, line)                                     # second time: nothing to do
+            return line.profile_set
+
+    OWNER_NUMBERS["inst-1"] = "972501000001"
+    assert asyncio.run(go()) is True
+    assert len(PROFILE_CALLS) == 1
+    name, display, pic = PROFILE_CALLS[0]
+    assert (name, display) == ("inst-1", "the gate mta") and pic and base64_is_jpeg(pic)
+    assert line_rows()["L1"].phone == "972501000001"
+
+
+def base64_is_jpeg(b64):
+    import base64
+    return base64.b64decode(b64)[:3] == b"\xff\xd8\xff"
+
+
+def test_profile_failure_is_recorded_and_retried(lines3, monkeypatch):
+    import asyncio
+    from app.lines import apply_profile
+    from app.models import WhatsAppLine
+
+    async def broken(name, display_name, picture, client=None):
+        return ["picture: boom"]
+
+    async def go(fn):
+        with SessionLocal() as db:
+            line = db.query(WhatsAppLine).filter_by(label="L1").one()
+            ok = await apply_profile(db, line, profile_fn=fn)
+            return ok, line.profile_set, line.profile_error
+
+    assert asyncio.run(go(broken)) == (False, False, "picture: boom")
+    async def fine(name, display_name, picture, client=None):
+        return []
+    assert asyncio.run(go(fine)) == (True, True, None)
+
+
+def test_lines_page_profile_buttons_and_auto_apply(admin, doorman, lines3, monkeypatch):
+    async def state(name, client=None):
+        return "open" if name != "inst-3" else "close"
+
+    monkeypatch.setattr("app.main.evolution_state", state)
+    OWNER_NUMBERS["inst-1"] = "972501000001"
+    assert doorman.post("/lines/profile-all").status_code == 403
+    page = admin.get("/lines").text
+    assert "Apply profile to all connected lines" in page and "Profile:" in page and "between your own lines" in page
+    l1 = line_rows()["L1"].id
+    r = admin.post(f"/lines/{l1}/refresh")                                  # connecting is detected -> profile + number
+    assert "connection is “open”" in r.text and PROFILE_CALLS[-1][:2] == ("inst-1", "the gate mta")
+    assert line_rows()["L1"].profile_set and line_rows()["L1"].phone == "972501000001"
+    n = len(PROFILE_CALLS)
+    r = admin.post(f"/lines/{l1}/profile")
+    assert "profile set to “the gate mta”" in r.text and len(PROFILE_CALLS) == n + 1
+    l3 = line_rows()["L3"].id
+    assert admin.post(f"/lines/{l3}/profile").status_code == 422             # not connected
+    r = admin.post("/lines/profile-all")
+    assert "Profile applied to 2 line(s)" in r.text
+
+
+def test_profile_name_and_picture_are_editable(admin, doorman):
+    from app import config as cfg
+    assert doorman.get("/settings/profile-picture").status_code == 403
+    img = admin.get("/settings/profile-picture")
+    assert img.status_code == 200 and img.headers["content-type"] == "image/jpeg" and img.content[:3] == b"\xff\xd8\xff"
+    r = admin.post("/settings/sending", data={"f.send.min_interval": "3", "f.send.jitter": "4", "f.send.long_pause_chance": "0.08",
+                                              "f.send.typing_ms.lo": "1200", "f.send.typing_ms.hi": "3800", "f.lines.daily_cap": "150",
+                                              "f.lines.min_working": "3", "f.lines.test_hours": "24", "f.profile.name": "The Gate MTA",
+                                              "f.lines.test_reply": "on", "f.profile.auto": "on"})
+    assert r.status_code == 200 and cfg.WHATSAPP_PROFILE_NAME == "The Gate MTA"
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 50
+    assert admin.post("/settings/profile-picture", files={"file": ("p.png", png, "image/png")}).status_code == 200
+    assert admin.get("/settings/profile-picture").headers["content-type"] == "image/png"
+    for bad in (b"not an image", b"\xff\xd8\xff" + b"0" * (2 * 1024 * 1024 + 5)):
+        assert admin.post("/settings/profile-picture", files={"file": ("p.jpg", bad, "image/jpeg")}).status_code == 422
+    assert doorman.post("/settings/profile-picture", files={"file": ("p.png", png, "image/png")}).status_code == 403
+    assert "built-in logo" in admin.post("/settings/profile-picture", data={"reset": "1"}).text
+    assert admin.get("/settings/profile-picture").headers["content-type"] == "image/jpeg"
+
+
+def test_evolution_helpers_for_owner_number_and_profile():
+    import asyncio
+    seen = []
+
+    def handler(request: httpx.Request):
+        seen.append((request.method, request.url.path, request.url.query.decode(), request.content))
+        if request.url.path.startswith("/instance/fetchInstances"):
+            return httpx.Response(200, json=[{"name": "x", "ownerJid": "972501234567:12@s.whatsapp.net"}])
+        return httpx.Response(200, json={"ok": True})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            num = await services.evolution_owner_number("line-9", client=c)
+            problems = await services.evolution_set_profile("line-9", "the gate mta", "QUJD", client=c)
+            return num, problems
+
+    import app.services as sv
+    old = sv.random.uniform
+    sv.random.uniform = lambda a, b: 0.0
+    try:
+        num, problems = asyncio.run(go())
+    finally:
+        sv.random.uniform = old
+    assert num == "972501234567" and problems == []
+    assert seen[0][:3] == ("GET", "/instance/fetchInstances", "instanceName=line-9")
+    assert seen[1][1] == "/chat/updateProfileName/line-9" and json.loads(seen[1][3]) == {"name": "the gate mta"}
+    assert seen[2][1] == "/chat/updateProfilePicture/line-9" and json.loads(seen[2][3]) == {"picture": "QUJD"}
+
+
+def test_chat_text_between_lines_varies():
+    from app.messages import line_chat_text
+    msgs = {line_chat_text() for _ in range(100)}
+    assert len(msgs) > 15 and all(m and "{" not in m for m in msgs) and line_chat_text(reply=True)
+
+
+def test_migration_adds_profile_columns(tmp_path):
+    from sqlalchemy import create_engine, text
+    from app.database import migrate
+    eng = create_engine(f"sqlite:///{tmp_path}/old4.db")
+    with eng.begin() as c:
+        c.execute(text("CREATE TABLE whatsapp_lines (id INTEGER PRIMARY KEY, label TEXT, instance_name TEXT, status TEXT)"))
+    migrate(eng)
+    migrate(eng)
+    with eng.begin() as c:
+        c.execute(text("SELECT profile_set, profile_error FROM whatsapp_lines"))

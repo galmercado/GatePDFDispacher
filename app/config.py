@@ -40,6 +40,9 @@ LINE_DAILY_CAP = int(os.getenv("LINE_DAILY_CAP", "150"))            # messages p
 MIN_WORKING_LINES = int(os.getenv("MIN_WORKING_LINES", "3"))        # admins see an alert below this
 WHATSAPP_TEST_NUMBER = re.sub(r"\D", "", os.getenv("WHATSAPP_TEST_NUMBER", ""))   # receives the pre-event line test
 LINE_TEST_HOURS_BEFORE = float(os.getenv("LINE_TEST_HOURS_BEFORE", "24"))
+LINE_TEST_REPLY = os.getenv("LINE_TEST_REPLY", "true").strip().lower() in {"1", "true", "yes", "on"}   # the receiving line answers
+WHATSAPP_PROFILE_NAME = os.getenv("WHATSAPP_PROFILE_NAME", "the gate mta")      # profile name given to every newly connected line
+WHATSAPP_AUTO_PROFILE = os.getenv("WHATSAPP_AUTO_PROFILE", "true").strip().lower() in {"1", "true", "yes", "on"}
 LINE_TEST_GAP = (8.0, 25.0)                                          # random seconds between two line tests
 
 # Google sign-in (OAuth 2.0). Only users whose email is already in the Users list may sign in.

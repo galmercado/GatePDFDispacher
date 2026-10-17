@@ -147,8 +147,12 @@ Admins get a **Lines** page (SIM-card icon in the header). Each line is one What
 - **Fail-over:** if a line errors with HTTP 5xx / a dropped session, the same message is retried on the next line. Only if that
   next line *delivers* is the first one marked **Not functioning** - so one bad guest number can never mark every line as dead. A 4xx
   (bad recipient) or an outage on all lines marks nothing.
-- **24 h before every event** each line is tested (connection check, plus a short message to the **test number** you set on the Lines page).
-  A line that recovers is switched back to Working by the next test. **Test all lines now** runs it on demand.
+- **24 h before every event** each line is tested - as a short, ordinary chat **between your own lines**: every connected line messages the next one in a ring and the
+  receiver answers with a short reply, so each number shows normal activity (the lines' phone numbers are read from Evolution automatically). Only when no other
+  connected line is available does a line write to the optional backup **test number** (Lines page). A line that recovers is switched back to Working by the next test.
+  **Test all lines now** runs it on demand.
+- **Profile:** when a line connects it automatically gets the WhatsApp profile name **the gate mta** and the Gate logo as its picture (name, picture and the on/off switch are on the
+  Settings page; *Apply profile* / *Apply profile to all connected lines* on the Lines page re-apply them).
 - With fewer than `MIN_WORKING_LINES` (3) working lines, admins see a red alert on the home page.
 
 **Looking less like a bot**: every ticket text is assembled from interchangeable parts (greeting, wording, optional date line, closing,

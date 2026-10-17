@@ -68,6 +68,13 @@ def migrate(bind: Engine) -> None:
         with bind.begin() as conn:
             conn.execute(text("ALTER TABLE attendees ADD COLUMN external_ref VARCHAR(32)"))
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_attendees_external_ref ON attendees (external_ref)"))
+    if "whatsapp_lines" in names:
+        line_cols = {c["name"] for c in insp.get_columns("whatsapp_lines")}
+        with bind.begin() as conn:
+            if "profile_set" not in line_cols:
+                conn.execute(text("ALTER TABLE whatsapp_lines ADD COLUMN profile_set BOOLEAN NOT NULL DEFAULT 0"))
+            if "profile_error" not in line_cols:
+                conn.execute(text("ALTER TABLE whatsapp_lines ADD COLUMN profile_error TEXT"))
     if "events" in names and "external_id" not in {c["name"] for c in insp.get_columns("events")}:
         with bind.begin() as conn:
             conn.execute(text("ALTER TABLE events ADD COLUMN external_id VARCHAR(32)"))

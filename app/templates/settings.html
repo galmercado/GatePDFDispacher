@@ -10,6 +10,19 @@
 {% for m in messages %}<div class="mb-3 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200" role="status"><i class="ph-fill ph-check-circle"></i> {{ m }}</div>{% endfor %}
 {% if errors %}<div class="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert"><ul class="list-inside list-disc">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
 
+<section class="mb-4 flex items-center gap-4 rounded-2xl border border-slate-800 bg-slate-900 p-4">
+  <img src="/settings/profile-picture" alt="WhatsApp profile picture" class="h-20 w-20 shrink-0 rounded-full border border-slate-700 object-cover">
+  <div class="min-w-0 flex-1">
+    <h2 class="font-semibold text-white">WhatsApp profile picture</h2>
+    <p class="mb-2 text-xs text-slate-500">Given to every line when it connects (together with the profile name below). JPEG or PNG, up to 2 MB.</p>
+    <form method="post" action="/settings/profile-picture" enctype="multipart/form-data" class="flex flex-wrap items-center gap-2">
+      <input type="file" name="file" accept="image/jpeg,image/png" required class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 text-xs text-slate-300 file:mr-2 file:border-0 file:bg-slate-800 file:px-3 file:py-2 file:text-slate-200">
+      <button class="rounded-xl bg-slate-800 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-700">Upload</button>
+      <button name="reset" value="1" formnovalidate class="rounded-xl border border-slate-600 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">Use the built-in logo</button>
+    </form>
+  </div>
+</section>
+
 {% for gid, title, items in groups %}
 <details class="mb-4 rounded-2xl border border-slate-800 bg-slate-900" {{ 'open' if (open_group == gid or (not open_group and loop.first)) }}>
   <summary class="cursor-pointer list-none p-4 text-lg font-semibold text-white">{{ title }}</summary>

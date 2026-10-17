@@ -37,7 +37,7 @@ from .messages import ticket_caption
 from .services import (
     AttendeeIn, ImportValidationError, describe_validation_error, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
     import_attendees,
-    GridRow, MemberBook, RegistrationError, evolution_connect, evolution_create_instance, evolution_delete_instance, evolution_state,
+    GridRow, MemberBook, RegistrationError, evolution_connect, evolution_create_instance, evolution_owner_number, evolution_set_profile, evolution_delete_instance, evolution_state,
     event_ticket_dir, fetch_registration_page, name_keys, normalize_phone, parse_registration_grid, parse_member_file, parse_member_text, parse_registration_html, parse_rows, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, ticket_status,
 )
 
@@ -1342,7 +1342,7 @@ async def test_all_lines(request: Request, user: User = Depends(require_admin), 
 @app.post("/lines/{line_id}/test", response_class=HTMLResponse)
 async def test_one_line(line_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     line = get_line_or_404(db, line_id)
-    ok = await linesmod.test_line(db, line)
+    ok = await linesmod.test_one(db, line)
     msg = f"{line.label}: working." if ok else f"{line.label}: {line.last_error}"
     return render(request, "lines.html", lines_ctx(db, user, **({"messages": [msg]} if ok else {"errors": [msg]})))
 
@@ -1355,6 +1355,8 @@ async def refresh_line(line_id: int, request: Request, user: User = Depends(requ
         if line.connection == "open" and line.status == "pending":
             line.status = "active"
         db.commit()
+        if line.connection == "open":
+            await linesmod.on_connected(db, line, phone_fn=evolution_owner_number, profile_fn=evolution_set_profile)
     except WhatsAppError as exc:
         return render(request, "lines.html", lines_ctx(db, user, errors=[f"{line.label}: {exc}"]), status=422)
     return render(request, "lines.html", lines_ctx(db, user, messages=[f"{line.label}: connection is “{line.connection}”."]))
@@ -1376,6 +1378,7 @@ async def connect_line(line_id: int, request: Request, number: str = Form(""), u
             if line.status == "pending":
                 line.status = "active"
             db.commit()
+            await linesmod.on_connected(db, line, phone_fn=evolution_owner_number, profile_fn=evolution_set_profile)
             return render(request, "partials/line_qr.html", {**ctx, "connected": True},
                           headers={"HX-Trigger": json.dumps({"lineConnected": ""})})
         info = await evolution_connect(line.instance_name, number or line.phone)
@@ -1386,6 +1389,43 @@ async def connect_line(line_id: int, request: Request, number: str = Form(""), u
     except WhatsAppError as exc:
         ctx["error"] = str(exc)
     return render(request, "partials/line_qr.html", ctx)
+
+
+@app.post("/lines/profile-all", response_class=HTMLResponse)
+async def profile_all_lines(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """(Re)apply the profile name and picture to every connected line, with pauses in between."""
+    done = failed = 0
+    for i, line in enumerate(db.query(WhatsAppLine).filter(WhatsAppLine.status != "disabled").order_by(WhatsAppLine.id)):
+        try:
+            state = await evolution_state(line.instance_name)
+        except WhatsAppError:
+            continue
+        line.connection = state
+        if state != "open":
+            continue
+        if i:
+            await asyncio.sleep(random.uniform(3.0, 10.0))
+        if await linesmod.apply_profile(db, line, profile_fn=evolution_set_profile):
+            done += 1
+        else:
+            failed += 1
+    return render(request, "lines.html", lines_ctx(db, user, messages=[f"Profile applied to {done} line(s)."],
+                                                    errors=[f"{failed} line(s) could not be updated - see the line's details."] if failed else []))
+
+
+@app.post("/lines/{line_id}/profile", response_class=HTMLResponse)
+async def profile_one_line(line_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    line = get_line_or_404(db, line_id)
+    try:
+        line.connection = await evolution_state(line.instance_name)
+    except WhatsAppError as exc:
+        return render(request, "lines.html", lines_ctx(db, user, errors=[f"{line.label}: {exc}"]), status=422)
+    if line.connection != "open":
+        db.commit()
+        return render(request, "lines.html", lines_ctx(db, user, errors=[f"{line.label} is not connected - scan its QR code first."]), status=422)
+    if await linesmod.apply_profile(db, line, profile_fn=evolution_set_profile):
+        return render(request, "lines.html", lines_ctx(db, user, messages=[f"{line.label}: profile set to “{config.WHATSAPP_PROFILE_NAME}” with the logo."]))
+    return render(request, "lines.html", lines_ctx(db, user, errors=[f"{line.label}: {line.profile_error}"]), status=422)
 
 
 @app.post("/lines/{line_id}/toggle", response_class=HTMLResponse)
@@ -1613,6 +1653,29 @@ def settings_ctx(db: Session, user: User, **extra) -> dict:
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     return render(request, "settings.html", settings_ctx(db, user))
+
+
+@app.get("/settings/profile-picture")
+def profile_picture(user: User = Depends(require_admin)):
+    path = linesmod.profile_picture_path()
+    return FileResponse(path, media_type="image/png" if path.read_bytes()[:4] == b"\x89PNG" else "image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.post("/settings/profile-picture", response_class=HTMLResponse)
+async def upload_profile_picture(request: Request, file: UploadFile = File(None), reset: str = Form(""),
+                                 user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    target = config.STORAGE_DIR / "profile-picture"
+    if reset:
+        target.unlink(missing_ok=True)
+        return render(request, "settings.html", settings_ctx(db, user, messages=["The built-in logo is used again."]))
+    data_ = await file.read(2 * 1024 * 1024 + 1) if file is not None and file.filename else b""
+    if not data_ or len(data_) > 2 * 1024 * 1024 or not (data_[:3] == b"\xff\xd8\xff" or data_[:4] == b"\x89PNG"):
+        return render(request, "settings.html", settings_ctx(db, user, errors=["Upload a JPEG or PNG picture (up to 2 MB)."]), status=422)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data_)
+    return render(request, "settings.html", settings_ctx(db, user, messages=[
+        "Profile picture saved. It is used for lines connected from now on; press “Apply profile to all connected lines” on the Lines page to update the others."]))
 
 
 @app.post("/settings/{group}", response_class=HTMLResponse)
