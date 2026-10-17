@@ -151,6 +151,10 @@ Admins get a **Lines** page (SIM-card icon in the header). Each line is one What
   receiver answers with a short reply, so each number shows normal activity (the lines' phone numbers are read from Evolution automatically). Only when no other
   connected line is available does a line write to the optional backup **test number** (Lines page). A line that recovers is switched back to Working by the next test.
   **Test all lines now** runs it on demand.
+- **Debugging (HTTP 500 etc.):** every line has a **Diagnose** button. It checks, step by step and showing Evolution's raw answer for each: connection state, the number
+  linked, whether the target is registered on WhatsApp, a text *without* the "typing..." simulation and a text *with* it - so you can see exactly which step answers 500.
+  A test text that fails with 5xx while "typing" is retried once without it, and a line is never tested against its own number. Server side:
+  `docker compose logs --tail=80 evolution-api` (the stack trace) and `docker compose logs --tail=50 app` (the raw answer is logged as "Evolution API HTTP 500 on ...").
 - **Profile:** when a line connects it automatically gets the WhatsApp profile name **the gate mta** and the Gate logo as its picture (name, picture and the on/off switch are on the
   Settings page; *Apply profile* / *Apply profile to all connected lines* on the Lines page re-apply them).
 - With fewer than `MIN_WORKING_LINES` (3) working lines, admins see a red alert on the home page.

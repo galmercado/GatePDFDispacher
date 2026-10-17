@@ -17,6 +17,20 @@
 {% for m in messages %}<div class="mb-3 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200" role="status"><i class="ph-fill ph-check-circle"></i> {{ m }}</div>{% endfor %}
 {% for e in errors %}<div class="mb-3 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert"><i class="ph-fill ph-warning-circle mt-0.5"></i><span>{{ e }}</span></div>{% endfor %}
 
+{% if diagnosis %}
+<section class="mb-4 rounded-2xl border border-slate-700 bg-slate-900 p-4" id="diagnosis">
+  <h2 class="mb-2 font-semibold text-white"><i class="ph ph-stethoscope text-brand-400"></i> Diagnosis: {{ diagnosis.line }}</h2>
+  <ol class="space-y-2 text-sm">
+    {% for st in diagnosis.steps %}
+    <li class="rounded-lg border px-3 py-2 {{ 'border-emerald-500/30 bg-emerald-500/5' if st.ok else 'border-rose-500/40 bg-rose-500/10' }}">
+      <p class="{{ 'text-emerald-200' if st.ok else 'text-rose-200' }}"><b>{{ '✓' if st.ok else '✗' }} {{ st.name }}</b> {% if st.detail %}<span class="text-slate-300">- {{ st.detail }}</span>{% endif %}</p>
+      {% if st.raw %}<pre class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-slate-950 p-2 text-xs text-slate-300">{{ st.raw }}</pre>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  <p class="mt-2 text-xs text-slate-500">Send the failing step's raw answer (and <code>docker compose logs --tail=80 evolution-api</code>) when asking for help.</p>
+</section>
+{% endif %}
 <section class="mb-4 grid gap-3 rounded-2xl border border-slate-800 bg-slate-900 p-4 sm:grid-cols-2">
   <form method="post" action="/lines/settings">
     <label class="{{ label }}" for="tn">Backup test number (only used when there is no other connected line)</label>
@@ -64,7 +78,7 @@
   {% if l.last_error %}<p class="mt-2 rounded-lg bg-rose-500/10 px-2 py-1.5 text-xs text-rose-200">{{ l.last_error }}</p>{% endif %}
   <div class="mt-3 flex flex-wrap gap-2 text-xs">
     <button hx-post="/lines/{{ l.id }}/connect" hx-target="#line-content" hx-swap="innerHTML" class="flex items-center gap-1 rounded-lg bg-brand-500 px-3 py-1.5 font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-qr-code"></i> Connect / QR</button>
-    {% for action, text_, icon in [('test', 'Test', 'ph-heartbeat'), ('refresh', 'Refresh', 'ph-arrows-clockwise'), ('profile', 'Apply profile', 'ph-identification-badge')] %}
+    {% for action, text_, icon in [('test', 'Test', 'ph-heartbeat'), ('refresh', 'Refresh', 'ph-arrows-clockwise'), ('profile', 'Apply profile', 'ph-identification-badge'), ('diagnose', 'Diagnose', 'ph-stethoscope')] %}
     <form method="post" action="/lines/{{ l.id }}/{{ action }}"><button class="flex items-center gap-1 rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 hover:bg-slate-800"><i class="ph {{ icon }}"></i> {{ text_ }}</button></form>
     {% endfor %}
     {% if l.status == 'failed' %}<form method="post" action="/lines/{{ l.id }}/reset"><button class="rounded-lg border border-emerald-500/40 px-3 py-1.5 text-emerald-300 hover:bg-emerald-500/10">Mark as working</button></form>{% endif %}

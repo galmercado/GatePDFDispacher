@@ -1347,6 +1347,16 @@ async def test_one_line(line_id: int, request: Request, user: User = Depends(req
     return render(request, "lines.html", lines_ctx(db, user, **({"messages": [msg]} if ok else {"errors": [msg]})))
 
 
+@app.post("/lines/{line_id}/diagnose", response_class=HTMLResponse)
+async def diagnose_one_line(line_id: int, request: Request, target: str = Form(""),
+                            user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Run the step-by-step check and show every raw answer from Evolution."""
+    line = get_line_or_404(db, line_id)
+    digits = normalize_phone(target) if target.strip() else None
+    steps = await linesmod.diagnose_line(db, line, digits)
+    return render(request, "lines.html", lines_ctx(db, user, diagnosis={"line": line.label, "steps": steps}))
+
+
 @app.post("/lines/{line_id}/refresh", response_class=HTMLResponse)
 async def refresh_line(line_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
     line = get_line_or_404(db, line_id)

@@ -598,9 +598,10 @@ def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = F
 # --------------------------------------------------------------------------- WhatsApp
 
 class WhatsAppError(RuntimeError):
-    def __init__(self, message: str, status_code: int | None = None):
+    def __init__(self, message: str, status_code: int | None = None, raw: str = ""):
         super().__init__(message)
         self.status_code = status_code
+        self.raw = raw            # the gateway's raw answer (for diagnostics)
 
     @property
     def line_problem(self) -> bool:
@@ -703,7 +704,7 @@ async def _gateway_call(method: str, path: str, payload: dict | None, client: ht
         detail = describe_gateway_error(resp)
         log.warning("Evolution API HTTP %s on %s: %s", resp.status_code, path, resp.text[:500])
         raise WhatsAppError(f"WhatsApp gateway rejected the request (HTTP {resp.status_code}): {detail}",
-                            status_code=resp.status_code)
+                            status_code=resp.status_code, raw=resp.text[:600])
     return resp
 
 
@@ -752,11 +753,28 @@ async def delete_whatsapp_message(remote_jid: str, message_id: str,
 
 
 async def send_whatsapp_text(phone: str, text: str, instance: str | None = None,
-                             client: httpx.AsyncClient | None = None) -> None:
-    """Plain text message (used by the line health test)."""
-    payload = {"number": normalize_phone(phone), "text": text,
-               "delay": random.randint(*config.WHATSAPP_TYPING_MS)}
-    await _gateway_call("POST", "/message/sendText", payload, client, instance)
+                             client: httpx.AsyncClient | None = None, typing: bool = True) -> None:
+    """Plain text message (used by the line health test). If the gateway answers 5xx while simulating "typing...",
+    the same text is retried once without it - the typing/presence step is the most fragile part of Evolution."""
+    payload = {"number": normalize_phone(phone), "text": text}
+    if typing:
+        payload["delay"] = random.randint(*config.WHATSAPP_TYPING_MS)
+    try:
+        await _gateway_call("POST", "/message/sendText", payload, client, instance)
+    except WhatsAppError as exc:
+        if typing and (exc.status_code or 0) >= 500:
+            log.warning("sendText failed with HTTP %s while typing; retrying without the typing delay", exc.status_code)
+            await send_whatsapp_text(phone, text, instance, client, typing=False)
+        else:
+            raise
+
+
+async def evolution_numbers_exist(instance: str, numbers: list[str], client: httpx.AsyncClient | None = None) -> list[dict]:
+    """Ask Evolution whether these phone numbers are registered on WhatsApp (POST /chat/whatsappNumbers)."""
+    resp = await _gateway_call("POST", "/chat/whatsappNumbers", {"numbers": [normalize_phone(n) for n in numbers]},
+                               client, instance, throttled=False)
+    body = resp.json()
+    return body if isinstance(body, list) else []
 
 
 # ---- instance management (talks to Evolution only, never to WhatsApp contacts: not throttled)

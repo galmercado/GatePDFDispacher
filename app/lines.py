@@ -1,8 +1,10 @@
 """WhatsApp lines: pick the sending number, fail over when one misbehaves, health-test them before events."""
 import asyncio
 import base64
+import json
 import logging
 import random
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -15,7 +17,7 @@ from .database import SessionLocal
 from .messages import line_chat_text, line_test_text
 from .models import AppSetting, Event, WhatsAppLine, utcnow
 from .services import (
-    SentRef, WhatsAppError, evolution_owner_number, evolution_set_profile, evolution_state, send_whatsapp_text,
+    SentRef, WhatsAppError, evolution_numbers_exist, evolution_owner_number, evolution_set_profile, evolution_state, send_whatsapp_text,
 )
 
 log = logging.getLogger("gate.lines")
@@ -181,6 +183,9 @@ async def test_line(db: Session, line: WhatsAppLine, target: str | None = None, 
         error = f"Not connected (state: {line.connection})"
     if not error and not known_state:
         await on_connected(db, line, phone_fn, profile_fn)
+    if not error and target and line.phone and re.sub(r"\D", "", target) == line.phone:
+        error = ("The test number is this line's own number - a number cannot message itself. "
+                 "Set a different phone as the test number (Lines page) or connect a second line.")
     if not error and target:
         try:
             await text_fn(target, line_chat_text() if peer else line_test_text(line.label), instance=line.instance_name)
@@ -301,3 +306,61 @@ async def pretest_loop() -> None:
         except Exception:
             log.exception("Pre-event line test failed")
         await asyncio.sleep(600)
+
+
+class Step:
+    def __init__(self, name: str, ok: bool, detail: str = "", raw: str = ""):
+        self.name, self.ok, self.detail, self.raw = name, ok, detail, raw
+
+
+async def diagnose_line(db: Session, line: WhatsAppLine, target: str | None = None) -> list[Step]:
+    """Step-by-step check of one line with the gateway's raw answers, to find which step answers HTTP 500.
+
+    1 connection state, 2 owner number, 3 is the target registered on WhatsApp, 4 text WITHOUT 'typing...', 5 text WITH it.
+    The two texts are real messages to `target` (another of our lines, else the backup test number).
+    """
+    steps: list[Step] = []
+
+    async def run(name, coro, describe=lambda r: ""):
+        try:
+            result = await coro
+            steps.append(Step(name, True, describe(result)))
+            return result
+        except WhatsAppError as exc:
+            steps.append(Step(name, False, f"HTTP {exc.status_code}" if exc.status_code else "no answer", exc.raw or str(exc)))
+            return None
+
+    state = await run("Connection state", evolution_state(line.instance_name), lambda r: f"state: {r}")
+    owner = await run("Owner number (from Evolution)", evolution_owner_number(line.instance_name), lambda r: r or "unknown")
+    if state is not None:
+        line.connection = state
+    if owner and not line.phone:
+        line.phone = owner
+    db.commit()
+    if not target:
+        peers = [l for l in db.query(WhatsAppLine).filter(WhatsAppLine.status != "disabled", WhatsAppLine.id != line.id)
+                 if l.phone and l.connection == "open"]
+        target = peers[0].phone if peers else (test_number(db) or None)
+    if not target:
+        steps.append(Step("Target number", False, "No other connected line and no backup test number set - nothing to send to."))
+        return steps
+    steps.append(Step("Target number", True, f"+{target}"))
+    if line.phone and re.sub(r"\D", "", target) == line.phone:
+        steps.append(Step("Target is not this line", False, "The target is this line's own number - a number cannot message itself."))
+        return steps
+    exists = await run("Target registered on WhatsApp", evolution_numbers_exist(line.instance_name, [target]),
+                       lambda r: json.dumps(r, ensure_ascii=False)[:200])
+    if exists is not None and exists and exists[0].get("exists") is False:
+        steps[-1].ok, steps[-1].detail = False, "The target number is NOT registered on WhatsApp - check its country code."
+    if state == "open":
+        await run("Text without 'typing...'", send_whatsapp_text(target, line_chat_text(), instance=line.instance_name, typing=False), lambda r: "sent")
+        await asyncio.sleep(random.uniform(*config.LINE_TEST_GAP))
+        await run("Text with 'typing...'", _typed_text_no_retry(target, line.instance_name), lambda r: "sent")
+    return steps
+
+
+async def _typed_text_no_retry(target: str, instance: str) -> None:
+    """Like send_whatsapp_text with typing but WITHOUT the automatic retry, so a failure is visible."""
+    from .services import _gateway_call, normalize_phone
+    await _gateway_call("POST", "/message/sendText", {"number": normalize_phone(target), "text": line_chat_text(),
+                                                       "delay": random.randint(*config.WHATSAPP_TYPING_MS)}, None, instance)

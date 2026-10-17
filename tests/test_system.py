@@ -2335,3 +2335,97 @@ def test_migration_adds_profile_columns(tmp_path):
     migrate(eng)
     with eng.begin() as c:
         c.execute(text("SELECT profile_set, profile_error FROM whatsapp_lines"))
+
+
+# ----------------------------------------------------------------- debugging HTTP 500 from Evolution
+
+def test_text_is_retried_once_without_typing_after_a_500():
+    import asyncio
+    seen = []
+
+    def make(statuses):
+        def handler(request: httpx.Request):
+            body = json.loads(request.content)
+            seen.append(body)
+            return httpx.Response(statuses.pop(0), json={"status": 500, "error": "Internal Server Error",
+                                                         "response": {"message": "presence update failed"}})
+        return handler
+
+    async def go(statuses):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(make(statuses))) as c:
+            await services.send_whatsapp_text("0501234567", "hi", instance="x", client=c)
+
+    asyncio.run(go([500, 201]))                                              # first with typing fails, retry without succeeds
+    assert len(seen) == 2 and "delay" in seen[0] and "delay" not in seen[1] and seen[0]["text"] == seen[1]["text"]
+    seen.clear()
+    with pytest.raises(services.WhatsAppError) as exc:
+        asyncio.run(go([500, 500]))
+    assert len(seen) == 2 and exc.value.status_code == 500 and "presence update failed" in exc.value.raw
+    seen.clear()
+    with pytest.raises(services.WhatsAppError):
+        asyncio.run(go([400]))                                               # 4xx is the recipient: no retry
+    assert len(seen) == 1
+
+
+def test_a_line_cannot_use_its_own_number_as_the_test_target(lines3):
+    import asyncio
+    from app.lines import test_line
+    from app.models import WhatsAppLine
+
+    async def state(name, client=None):
+        return "open"
+
+    async def text(number, body, instance=None, client=None):
+        raise AssertionError("must not send")
+
+    async def go():
+        with SessionLocal() as db:
+            line = db.query(WhatsAppLine).filter_by(label="L1").one()
+            line.phone = "972501000001"
+            ok = await test_line(db, line, target="972501000001", state_fn=state, text_fn=text)
+            return ok, line.last_error
+
+    ok, err = asyncio.run(go())
+    assert ok is False and "own number" in err
+
+
+def test_diagnosis_shows_each_step_with_the_raw_gateway_answer(admin, doorman, lines3, monkeypatch):
+    from app.lines import set_setting
+    raw500 = '{"status":500,"error":"Internal Server Error","response":{"message":"Connection Closed"}}'
+
+    async def state(name, client=None):
+        return "open"
+
+    async def exists(instance, numbers, client=None):
+        return [{"exists": True, "jid": numbers[0] + "@s.whatsapp.net", "number": numbers[0]}]
+
+    async def plain(phone, text, instance=None, client=None, typing=True):
+        return None
+
+    async def typed(target, instance):
+        raise services.WhatsAppError("HTTP 500", status_code=500, raw=raw500)
+
+    monkeypatch.setattr("app.lines.evolution_state", state)
+    monkeypatch.setattr("app.lines.evolution_numbers_exist", exists)
+    monkeypatch.setattr("app.lines.send_whatsapp_text", plain)
+    monkeypatch.setattr("app.lines._typed_text_no_retry", typed)
+    monkeypatch.setattr(config, "LINE_TEST_GAP", (0.0, 0.0))
+    with SessionLocal() as db:
+        set_setting(db, "test_number", "972509999999")
+    lid = line_rows()["L1"].id
+    assert doorman.post(f"/lines/{lid}/diagnose").status_code == 403
+    page = admin.post(f"/lines/{lid}/diagnose").text
+    assert "Diagnosis: L1" in page
+    for step in ("✓ Connection state", "✓ Target registered on WhatsApp", "✓ Text without &#39;typing...&#39;", "✗ Text with &#39;typing...&#39;"):
+        assert step in page, step
+    assert "Connection Closed" in page and "HTTP 500" in page                       # the raw answer is visible
+    # an unregistered target is called out
+    async def not_registered(instance, numbers, client=None):
+        return [{"exists": False, "jid": numbers[0] + "@s.whatsapp.net", "number": numbers[0]}]
+
+    monkeypatch.setattr("app.lines.evolution_numbers_exist", not_registered)
+    assert "is NOT registered on WhatsApp" in admin.post(f"/lines/{lid}/diagnose", data={"target": "052-0000000"}).text
+    # no target at all
+    with SessionLocal() as db:
+        set_setting(db, "test_number", "")
+    assert "nothing to send to" in admin.post(f"/lines/{lid}/diagnose").text
