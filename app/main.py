@@ -56,6 +56,7 @@ def format_age(value) -> str:
 
 templates.env.filters["age"] = format_age
 templates.env.globals["app_version"] = __version__
+templates.env.globals["error_hint"] = lambda text: linesmod.error_hint(text)
 
 
 def seed_admin() -> None:

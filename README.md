@@ -155,6 +155,11 @@ Admins get a **Lines** page (SIM-card icon in the header). Each line is one What
   linked, whether the target is registered on WhatsApp, a text *without* the "typing..." simulation and a text *with* it - so you can see exactly which step answers 500.
   A test text that fails with 5xx while "typing" is retried once without it, and a line is never tested against its own number. Server side:
   `docker compose logs --tail=80 evolution-api` (the stack trace) and `docker compose logs --tail=50 app` (the raw answer is logged as "Evolution API HTTP 500 on ...").
+- **“Connection Closed” + `conflict ... replaced` in the Evolution log** means the *same WhatsApp session is connected twice* (two Evolution containers, a copied database, or one
+  login linked in two instances) and the two keep kicking each other out; every send in that moment fails with HTTP 500. Fix: run only ONE Evolution stack
+  (`docker compose ps`, `docker ps -a | grep evolution`), then `docker compose restart evolution-api`; if it keeps looping, remove the line, delete the stale
+  \"Evolution API\" devices under WhatsApp > Linked devices and link the phone again. The app now waits a few seconds and retries a test text once after "Connection Closed",
+  and the Lines page explains the usual errors next to the failing line.
 - **Profile:** when a line connects it automatically gets the WhatsApp profile name **the gate mta** and the Gate logo as its picture (name, picture and the on/off switch are on the
   Settings page; *Apply profile* / *Apply profile to all connected lines* on the Lines page re-apply them).
 - With fewer than `MIN_WORKING_LINES` (3) working lines, admins see a red alert on the home page.

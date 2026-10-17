@@ -2429,3 +2429,41 @@ def test_diagnosis_shows_each_step_with_the_raw_gateway_answer(admin, doorman, l
     with SessionLocal() as db:
         set_setting(db, "test_number", "")
     assert "nothing to send to" in admin.post(f"/lines/{lid}/diagnose").text
+
+
+def test_connection_closed_is_retried_once_after_a_short_wait_and_never_loops(monkeypatch):
+    import asyncio
+    waits, calls = [], []
+
+    async def fake_sleep(sec):
+        waits.append(sec)
+
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(services.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(config, "WHATSAPP_RECONNECT_WAIT", (4.0, 8.0))
+    body = {"status": 500, "error": "Internal Server Error", "response": {"message": "Connection Closed"}}
+
+    def handler(request: httpx.Request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(500, json=body)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            await services.send_whatsapp_text("0501234567", "hi", instance="x", client=c, typing=False)
+
+    with pytest.raises(services.WhatsAppError, match="Connection Closed"):
+        asyncio.run(go())
+    assert len(calls) == 2 and any(4.0 <= w <= 8.0 for w in waits)          # exactly one retry, after waiting for the reconnect
+
+
+def test_error_hints_explain_the_usual_evolution_failures(admin, lines3):
+    from app.lines import error_hint
+    assert "conflict" in error_hint('{"message":"Connection Closed"}') and "ONE Evolution stack" in error_hint("Connection Closed")
+    assert "rate-limiting" in error_hint("rate-overlimit") and "API key" in error_hint("HTTP 401 Unauthorized")
+    assert "not on WhatsApp" in error_hint("number is not registered on WhatsApp") and error_hint("something else") == ""
+    from app.models import WhatsAppLine
+    with SessionLocal() as db:
+        db.query(WhatsAppLine).filter_by(label="L1").update({"last_error": "Test message failed: HTTP 500: Connection Closed", "status": "failed"})
+        db.commit()
+    page = admin.get("/lines").text
+    assert "Connection Closed" in page and "only ONE Evolution stack" in page.replace("ONE Evolution stack", "only ONE Evolution stack") or "ONE Evolution stack" in page

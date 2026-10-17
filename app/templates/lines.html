@@ -25,6 +25,7 @@
     <li class="rounded-lg border px-3 py-2 {{ 'border-emerald-500/30 bg-emerald-500/5' if st.ok else 'border-rose-500/40 bg-rose-500/10' }}">
       <p class="{{ 'text-emerald-200' if st.ok else 'text-rose-200' }}"><b>{{ '✓' if st.ok else '✗' }} {{ st.name }}</b> {% if st.detail %}<span class="text-slate-300">- {{ st.detail }}</span>{% endif %}</p>
       {% if st.raw %}<pre class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-slate-950 p-2 text-xs text-slate-300">{{ st.raw }}</pre>{% endif %}
+      {% if st.hint %}<p class="mt-1 rounded bg-amber-500/10 px-2 py-1 text-xs text-amber-200"><i class="ph-fill ph-lightbulb"></i> {{ st.hint }}</p>{% endif %}
     </li>
     {% endfor %}
   </ol>
@@ -75,7 +76,8 @@
     <div>Last used: <b class="text-slate-200">{{ l.last_used_at.strftime('%d/%m %H:%M') + ' UTC' if l.last_used_at else '-' }}</b></div>
     <div class="col-span-2">Profile: <b class="{{ 'text-emerald-300' if l.profile_set else 'text-slate-200' }}">{{ 'name + picture set' if l.profile_set else 'not set yet' }}</b>{% if l.profile_error %} <span class="text-rose-300">· {{ l.profile_error }}</span>{% endif %}</div>
   </dl>
-  {% if l.last_error %}<p class="mt-2 rounded-lg bg-rose-500/10 px-2 py-1.5 text-xs text-rose-200">{{ l.last_error }}</p>{% endif %}
+  {% if l.last_error %}<p class="mt-2 rounded-lg bg-rose-500/10 px-2 py-1.5 text-xs text-rose-200">{{ l.last_error }}</p>
+  {% if error_hint(l.last_error) %}<p class="mt-1 rounded-lg bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200"><i class="ph-fill ph-lightbulb"></i> {{ error_hint(l.last_error) }}</p>{% endif %}{% endif %}
   <div class="mt-3 flex flex-wrap gap-2 text-xs">
     <button hx-post="/lines/{{ l.id }}/connect" hx-target="#line-content" hx-swap="innerHTML" class="flex items-center gap-1 rounded-lg bg-brand-500 px-3 py-1.5 font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-qr-code"></i> Connect / QR</button>
     {% for action, text_, icon in [('test', 'Test', 'ph-heartbeat'), ('refresh', 'Refresh', 'ph-arrows-clockwise'), ('profile', 'Apply profile', 'ph-identification-badge'), ('diagnose', 'Diagnose', 'ph-stethoscope')] %}

@@ -308,9 +308,27 @@ async def pretest_loop() -> None:
         await asyncio.sleep(600)
 
 
+def error_hint(text: str) -> str:
+    """Plain-language advice for the errors Evolution/WhatsApp typically produce."""
+    t = (text or "").lower()
+    if "connection closed" in t or "conflict" in t or "replaced" in t:
+        return ("The WhatsApp session dropped while sending. If `docker compose logs evolution-api` shows \"conflict ... replaced\", the same "
+                "WhatsApp session is being used by two connections at once (a second Evolution container, a copy of the database, or two "
+                "instances for the same login) and they keep kicking each other out. Make sure only ONE Evolution stack runs, then "
+                "`docker compose restart evolution-api`; if it keeps looping, remove this line and link the phone again (also remove old "
+                "\"Evolution API\" entries under WhatsApp > Linked devices).")
+    if "rate" in t and "limit" in t or "overlimit" in t or "429" in t:
+        return "WhatsApp is rate-limiting this number: let it rest, lower its daily limit and raise the pause between messages."
+    if "unauthorized" in t or "401" in t:
+        return "Evolution rejected the API key - EVOLUTION_API_KEY in .env must match the running container (recreate it after changing)."
+    if "not registered" in t or "exists" in t and "false" in t:
+        return "The recipient number is not on WhatsApp - check the country code and local prefix."
+    return ""
+
+
 class Step:
-    def __init__(self, name: str, ok: bool, detail: str = "", raw: str = ""):
-        self.name, self.ok, self.detail, self.raw = name, ok, detail, raw
+    def __init__(self, name: str, ok: bool, detail: str = "", raw: str = "", hint: str = ""):
+        self.name, self.ok, self.detail, self.raw, self.hint = name, ok, detail, raw, hint
 
 
 async def diagnose_line(db: Session, line: WhatsAppLine, target: str | None = None) -> list[Step]:
@@ -327,7 +345,8 @@ async def diagnose_line(db: Session, line: WhatsAppLine, target: str | None = No
             steps.append(Step(name, True, describe(result)))
             return result
         except WhatsAppError as exc:
-            steps.append(Step(name, False, f"HTTP {exc.status_code}" if exc.status_code else "no answer", exc.raw or str(exc)))
+            steps.append(Step(name, False, f"HTTP {exc.status_code}" if exc.status_code else "no answer", exc.raw or str(exc),
+                              error_hint(exc.raw or str(exc))))
             return None
 
     state = await run("Connection state", evolution_state(line.instance_name), lambda r: f"state: {r}")

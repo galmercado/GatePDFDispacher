@@ -753,7 +753,7 @@ async def delete_whatsapp_message(remote_jid: str, message_id: str,
 
 
 async def send_whatsapp_text(phone: str, text: str, instance: str | None = None,
-                             client: httpx.AsyncClient | None = None, typing: bool = True) -> None:
+                             client: httpx.AsyncClient | None = None, typing: bool = True, _retry: bool = True) -> None:
     """Plain text message (used by the line health test). If the gateway answers 5xx while simulating "typing...",
     the same text is retried once without it - the typing/presence step is the most fragile part of Evolution."""
     payload = {"number": normalize_phone(phone), "text": text}
@@ -762,9 +762,11 @@ async def send_whatsapp_text(phone: str, text: str, instance: str | None = None,
     try:
         await _gateway_call("POST", "/message/sendText", payload, client, instance)
     except WhatsAppError as exc:
-        if typing and (exc.status_code or 0) >= 500:
-            log.warning("sendText failed with HTTP %s while typing; retrying without the typing delay", exc.status_code)
-            await send_whatsapp_text(phone, text, instance, client, typing=False)
+        if _retry and (exc.status_code or 0) >= 500 and (typing or "connection closed" in str(exc).lower() + exc.raw.lower()):
+            if "connection closed" in str(exc).lower() + exc.raw.lower():   # the socket was just re-connecting: give it a moment
+                await asyncio.sleep(random.uniform(*config.WHATSAPP_RECONNECT_WAIT))
+            log.warning("sendText failed with HTTP %s; retrying once without the typing delay", exc.status_code)
+            await send_whatsapp_text(phone, text, instance, client, typing=False, _retry=False)
         else:
             raise
 
