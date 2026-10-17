@@ -61,8 +61,13 @@
   </div>
   {% endif %}
   {% set can_flag = a.remaining_total > 0 %}
-  {% if (a.ticket_count > 1 and a.releasable > 0) or is_admin or can_flag %}
+  {% if (a.ticket_count > 1 and a.releasable > 0) or is_admin or can_flag or delivered %}
   <div class="mt-2 flex items-center justify-end gap-2">
+    {% if delivered %}
+    <button hx-get="/attendees/{{ a.id }}/resend-form" hx-target="#qr-content" hx-swap="innerHTML"
+            class="flex items-center gap-1 rounded-lg border border-slate-700 px-2.5 py-1 text-xs font-medium text-slate-300 hover:bg-slate-800">
+      <i class="ph ph-arrow-counter-clockwise"></i> Resend sent ({{ delivered }})</button>
+    {% endif %}
     {% if can_flag %}
     <button hx-get="/attendees/{{ a.id }}/shirt-form" hx-target="#qr-content" hx-swap="innerHTML"
             class="flex items-center gap-1 rounded-lg border border-yellow-400/40 px-2.5 py-1 text-xs font-medium text-yellow-200 hover:bg-yellow-400/10">

@@ -1266,6 +1266,42 @@ def qr_modal(attendee_id: int, request: Request, user: User = Depends(require_st
                   headers={"HX-Trigger": "refreshStats"})
 
 
+# ---- resend: give a guest the tickets that were already handed out once more (e.g. the first message never arrived)
+
+def resend_targets(attendee: Attendee) -> list[Ticket]:
+    return [t for t in attendee.tickets if t.delivered_at]
+
+
+@app.get("/attendees/{attendee_id}/resend-form", response_class=HTMLResponse)
+def resend_form(attendee_id: int, request: Request, user: User = Depends(require_staff), db: Session = Depends(get_db)):
+    attendee = get_attendee_or_404(db, attendee_id)
+    return render(request, "partials/resend_form.html", {"attendee": attendee, "count": len(resend_targets(attendee)), "errors": []})
+
+
+@app.post("/attendees/{attendee_id}/resend", response_class=HTMLResponse)
+async def resend_tickets(attendee_id: int, request: Request, via: str = Form("whatsapp"),
+                         user: User = Depends(require_staff), db: Session = Depends(get_db)):
+    """Send the already-delivered tickets again, without changing who is admitted."""
+    attendee = get_attendee_or_404(db, attendee_id)
+    event = db.get(Event, attendee.event_id)
+    targets = resend_targets(attendee)
+
+    def again(error: str):
+        return render(request, "partials/resend_form.html", {"attendee": attendee, "count": len(targets), "errors": [error]})
+
+    if not targets:
+        return again("No ticket has been sent to this guest yet.")
+    if via == "qr":
+        bundle, unreachable = qr_bundle(db, request, attendee, targets)
+        return render(request, "partials/qr_modal.html", {"attendee": attendee, "bundle": bundle, "unreachable": unreachable,
+                                                          "note": "Tickets that were already handed out"})
+    try:
+        sent = await send_tickets(db, attendee, event, targets)
+    except WhatsAppError as exc:
+        return again(f"WhatsApp failed: {exc}")
+    return oob_card(request, attendee, toast(f"Sent {len(sent)} ticket{'s' if len(sent) != 1 else ''} to {attendee.name} again"))
+
+
 # ---- "shirt missing": the guest gets the payment link; the tickets without a shirt are held until an admin confirms
 
 def shirt_message(attendee: Attendee, count: int) -> str:

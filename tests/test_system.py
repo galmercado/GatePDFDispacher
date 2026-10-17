@@ -2743,3 +2743,38 @@ def test_shirt_missing_whatsapp_failure_holds_nothing(admin, doorman, event_id, 
     r = doorman.post(f"/attendees/{att}/shirt-missing", data={"count": "1", "via": "whatsapp"})
     assert "gateway down" in r.text
     assert "ring-yellow-400/60" not in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+
+
+@pytest.mark.parametrize("adult,youth,hold,first", [(2, 0, 1, "whatsapp"), (1, 1, 1, "whatsapp"), (0, 2, 1, "qr"), (2, 1, 1, "qr"),
+                                                     (2, 1, 2, "whatsapp"), (3, 0, 2, "qr"), (1, 1, 1, "qr")])
+def test_shirt_hold_then_release_hands_out_everything(admin, doorman, event_id, wa, shirt_texts, adult, youth, hold, first):
+    att = party(admin, event_id, adult, youth)
+    total = adult + youth
+    doorman.post(f"/attendees/{att}/shirt-missing", data={"count": str(hold), "via": first})
+    now = total - hold
+    r1 = doorman.post(f"/attendees/{att}/whatsapp" if first == "whatsapp" else f"/attendees/{att}/qr")
+    got = admitted(att)
+    assert sum(got[3]) == now and got[0] + got[1] == now, (got, r1.text[:300])
+    if now == 0:
+        assert "ring-yellow-400/60" in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    admin.post(f"/attendees/{att}/shirt-release")
+    card = doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    assert "ring-yellow-400/60" not in card
+    for path in ("whatsapp", "qr"):                      # either button hands out what is left
+        r = doorman.post(f"/attendees/{att}/{path}")
+        break
+    got = admitted(att)
+    assert got[0] == adult and got[1] == youth and all(got[3]), (got, r.text[:300])
+
+
+def test_resend_gives_the_already_sent_tickets_again_without_changing_admission(admin, doorman, event_id, wa):
+    att = party(admin, event_id)
+    assert "Resend sent" not in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    doorman.post(f"/attendees/{att}/partial", data={"adult": "1", "youth": "0", "via": "whatsapp"})
+    assert "Resend sent (1)" in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    assert "1 ticket" in doorman.get(f"/attendees/{att}/resend-form").text
+    before = admitted(att)
+    r = doorman.post(f"/attendees/{att}/resend", data={"via": "whatsapp"})
+    assert "again" in r.headers["HX-Trigger"] and wa["sent"] == ["MSG1", "MSG2"] and admitted(att) == before
+    r = doorman.post(f"/attendees/{att}/resend", data={"via": "qr"})
+    assert "1 ticket in one ZIP" in r.text and admitted(att) == before
