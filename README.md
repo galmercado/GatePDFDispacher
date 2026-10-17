@@ -108,6 +108,14 @@ the event can no longer be deleted afterwards. Evolution API does not expose Wha
 one-to-one chats, which is why the app does the deleting itself. Guests see "This message was deleted". Only messages sent after
 this feature was deployed can be deleted.
 
+## Door: shirt missing and partial send
+
+* **Shirt missing** (every doorman and admin, on each guest not yet fully admitted): a popup offers to send the tickets by WhatsApp link or show the QR.
+  The guest is then flagged **yellow and locked** - WhatsApp, QR, partial send and undo are disabled and the guest is *not* counted as admitted -
+  until someone presses **Admitted** (or **Clear flag** to cancel).
+* **Partial send** (orders of 2+ tickets): choose how many adult/youth tickets to send now. The main WhatsApp/QR buttons then send the rest, or send more
+  partially later. Every QR is a single link to one ZIP of the tickets handed out in that step.
+
 ## Ticket files: Google Drive, automatic upload API, compression, retention
 
 **Google Drive.** On an event's Manage page, under *Upload ticket PDF*, paste one or more Drive share links (one per line).

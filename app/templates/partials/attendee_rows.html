@@ -2,7 +2,7 @@
 {% for a in attendees %}
 {% set delivered = a.tickets|selectattr('delivered_at')|list|length %}
 {% set rest = (a.tickets|length - delivered) if (delivered and delivered < a.tickets|length) else 0 %}
-<article id="attendee-{{ a.id }}"{% if oob %} hx-swap-oob="true"{% endif %} class="pop rounded-2xl border p-4 {{ 'border-emerald-500/40 bg-emerald-950/30' if a.fully_admitted else ('border-amber-500/40 bg-amber-950/20' if a.partially_admitted else 'border-slate-800 bg-slate-900') }}">
+<article id="attendee-{{ a.id }}"{% if oob %} hx-swap-oob="true"{% endif %} class="pop rounded-2xl border p-4 {{ 'border-yellow-400 bg-yellow-400/20 ring-2 ring-yellow-400/60' if a.shirt_missing else 'border-emerald-500/40 bg-emerald-950/30' if a.fully_admitted else ('border-amber-500/40 bg-amber-950/20' if a.partially_admitted else 'border-slate-800 bg-slate-900') }}">
   <div class="flex items-start justify-between gap-3">
     <div class="min-w-0">
       <h3 class="truncate text-base font-semibold text-white">{{ a.name }}</h3>
@@ -16,8 +16,9 @@
       </div>
       {% if a.notes %}<p class="mt-2 text-sm italic text-slate-400"><i class="ph ph-note"></i> {{ a.notes }}</p>{% endif %}
     </div>
-    <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold {{ 'bg-emerald-500/20 text-emerald-300' if a.fully_admitted else ('bg-amber-500/20 text-amber-300' if a.partially_admitted else 'bg-slate-800 text-slate-300') }}">
-      {% if a.fully_admitted %}<i class="ph-fill ph-check-circle"></i> Admitted
+    <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold {{ 'bg-yellow-400 text-yellow-950' if a.shirt_missing else 'bg-emerald-500/20 text-emerald-300' if a.fully_admitted else ('bg-amber-500/20 text-amber-300' if a.partially_admitted else 'bg-slate-800 text-slate-300') }}">
+      {% if a.shirt_missing %}<i class="ph-fill ph-t-shirt"></i> Shirt missing
+      {% elif a.fully_admitted %}<i class="ph-fill ph-check-circle"></i> Admitted
       {% elif a.partially_admitted %}<i class="ph-fill ph-circle-half"></i> Partial {{ a.admitted_total }}/{{ a.ticket_count }}
       {% else %}<i class="ph ph-hourglass-medium"></i> Waiting{% endif %}
     </span>
@@ -25,6 +26,17 @@
   {% if a.partially_admitted %}<p class="mt-2 text-xs text-amber-300/90" dir="rtl">נכנסו {{ a.admitted_total }} מתוך {{ a.ticket_count }} · נשארו {{ a.remaining_total }}</p>
   {% elif a.checked_in and a.checked_in_at %}<p class="mt-2 text-xs text-emerald-400/70">Checked in {{ a.checked_in_at.strftime('%H:%M') }} UTC</p>{% endif %}
 
+  {% if a.shirt_missing %}
+  <div class="mt-3 rounded-xl bg-yellow-400/15 p-3 text-sm text-yellow-100">
+    <i class="ph-fill ph-t-shirt"></i> Tickets sent, but this guest is <b>not admitted</b> - the shirt is missing. Locked until someone presses Admitted.</div>
+  <div class="mt-2 grid grid-cols-[1fr_auto] gap-2">
+    <button hx-post="/attendees/{{ a.id }}/toggle" hx-target="#attendee-{{ a.id }}" hx-swap="outerHTML" hx-disabled-elt="this"
+            class="flex h-14 items-center justify-center gap-2 rounded-2xl bg-yellow-400 font-bold text-yellow-950 hover:bg-yellow-300 disabled:opacity-50">
+      <i class="ph-bold ph-check-circle text-2xl"></i> Admitted</button>
+    <button hx-post="/attendees/{{ a.id }}/shirt-clear" hx-target="#attendee-{{ a.id }}" hx-swap="outerHTML"
+            class="rounded-xl border border-yellow-400/40 px-3 text-xs font-medium text-yellow-200 hover:bg-yellow-400/10">Clear flag</button>
+  </div>
+  {% else %}
   {# WhatsApp and QR both admit; the small button on the side toggles admission only. After a partial send they hand out the rest. #}
   <div class="mt-3 grid grid-cols-[1fr_1fr_auto] gap-2">
     <button hx-post="/attendees/{{ a.id }}/whatsapp" hx-target="#attendee-{{ a.id }}" hx-swap="outerHTML"
@@ -44,9 +56,16 @@
       {% if a.checked_in %}<i class="ph ph-arrow-u-up-left text-base"></i>Undo{% else %}<i class="ph-bold ph-check text-base"></i>Admit{% endif %}
     </button>
   </div>
-  {% if (a.ticket_count > 1 and a.remaining_total > 0) or is_admin %}
+  {% endif %}
+  {% set can_flag = not a.fully_admitted and not a.shirt_missing %}
+  {% if (a.ticket_count > 1 and a.remaining_total > 0 and not a.shirt_missing) or is_admin or can_flag %}
   <div class="mt-2 flex items-center justify-end gap-2">
-    {% if a.ticket_count > 1 and a.remaining_total > 0 %}
+    {% if can_flag %}
+    <button hx-get="/attendees/{{ a.id }}/shirt-form" hx-target="#qr-content" hx-swap="innerHTML"
+            class="flex items-center gap-1 rounded-lg border border-yellow-400/40 px-2.5 py-1 text-xs font-medium text-yellow-200 hover:bg-yellow-400/10">
+      <i class="ph ph-t-shirt"></i> Shirt missing</button>
+    {% endif %}
+    {% if a.ticket_count > 1 and a.remaining_total > 0 and not a.shirt_missing %}
     <button hx-get="/attendees/{{ a.id }}/partial-form" hx-target="#qr-content" hx-swap="innerHTML"
             class="flex items-center gap-1 rounded-lg border border-slate-700 px-2.5 py-1 text-xs font-medium text-slate-300 hover:bg-slate-800">
       <i class="ph ph-split-horizontal"></i> Partial send</button>

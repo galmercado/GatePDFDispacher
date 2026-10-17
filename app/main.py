@@ -1176,7 +1176,10 @@ async def toggle_check_in(attendee_id: int, request: Request, user: User = Depen
                           db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
     note = None
-    if attendee.checked_in:           # un-admit (also after a partial entry): this order's messages and QR links go away
+    if attendee.shirt_missing:        # "Admitted" on a flagged guest: lets them in and removes the yellow flag
+        attendee.shirt_missing = False
+        admit_all(db, attendee)
+    elif attendee.checked_in:           # un-admit (also after a partial entry): this order's messages and QR links go away
         reset_admission(db, attendee)
         rotate_claim_tokens(db, attendee)
         if config.WHATSAPP_DELETE_ON_UNADMIT:
@@ -1192,6 +1195,8 @@ async def toggle_check_in(attendee_id: int, request: Request, user: User = Depen
 async def whatsapp_dispatch(attendee_id: int, request: Request,
                             user: User = Depends(require_staff), db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
+    if attendee.shirt_missing:
+        return card_response(request, attendee, toast(LOCKED_MSG, "error"))
     event = db.get(Event, attendee.event_id)
     targets = full_targets(attendee)
     admit_all(db, attendee)
@@ -1224,6 +1229,8 @@ def public_base_url(request: Request) -> str:
 def qr_modal(attendee_id: int, request: Request, user: User = Depends(require_staff),
              db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
+    if attendee.shirt_missing:
+        return oob_card(request, attendee, toast(LOCKED_MSG, "error"))
     targets = full_targets(attendee)
     admit_all(db, attendee)
     mark_delivered(db, targets)
@@ -1231,6 +1238,62 @@ def qr_modal(attendee_id: int, request: Request, user: User = Depends(require_st
     return render(request, "partials/qr_modal.html",
                   {"attendee": attendee, "bundle": bundle, "unreachable": unreachable},
                   headers={"HX-Trigger": "refreshStats"})
+
+
+# ---- "shirt missing": the tickets are handed out, but the guest stays flagged (and locked) until someone admits them
+
+LOCKED_MSG = "This guest is flagged: shirt missing. Press Admitted (or Clear flag) first."
+
+
+@app.get("/attendees/{attendee_id}/shirt-form", response_class=HTMLResponse)
+def shirt_form(attendee_id: int, request: Request, user: User = Depends(require_staff), db: Session = Depends(get_db)):
+    attendee = get_attendee_or_404(db, attendee_id)
+    if attendee.shirt_missing or attendee.fully_admitted:
+        return oob_card(request, attendee, toast("Nothing to flag for this guest.", "error"))
+    return render(request, "partials/shirt_form.html", {"attendee": attendee, "count": len(full_targets(attendee)), "errors": []})
+
+
+@app.post("/attendees/{attendee_id}/shirt-missing", response_class=HTMLResponse)
+async def shirt_missing(attendee_id: int, request: Request, via: str = Form("whatsapp"),
+                        user: User = Depends(require_staff), db: Session = Depends(get_db)):
+    attendee = get_attendee_or_404(db, attendee_id)
+    if attendee.shirt_missing or attendee.fully_admitted:
+        return oob_card(request, attendee, toast("Nothing to flag for this guest.", "error"))
+    event = db.get(Event, attendee.event_id)
+    targets = full_targets(attendee)
+
+    def again(error: str):
+        return render(request, "partials/shirt_form.html", {"attendee": attendee, "count": len(targets), "errors": [error]})
+
+    if via not in ("whatsapp", "qr"):
+        return again("Choose WhatsApp or QR.")
+    if not targets:
+        return again("No ticket PDF is attached to this guest.")
+    if via == "qr":
+        attendee.shirt_missing = True
+        mark_delivered(db, targets)
+        bundle, unreachable = qr_bundle(db, request, attendee, targets)
+        return render(request, "partials/qr_modal.html",
+                      {"attendee": attendee, "bundle": bundle, "unreachable": unreachable,
+                       "note": "Shirt missing - not admitted yet. Press Admitted on the card when they are in."},
+                      headers={"HX-Trigger": "refreshStats"})
+    try:
+        sent = await send_tickets(db, attendee, event, targets)
+    except WhatsAppError as exc:
+        log.warning("Shirt-missing WhatsApp send failed for attendee %s: %s", attendee.id, exc)
+        return again(f"WhatsApp failed: {exc}")
+    attendee.shirt_missing = True
+    db.commit()
+    return oob_card(request, attendee, toast(f"Sent {len(sent)} ticket{'s' if len(sent) != 1 else ''} to {attendee.name} - "
+                                               "flagged: shirt missing until admitted"))
+
+
+@app.post("/attendees/{attendee_id}/shirt-clear", response_class=HTMLResponse)
+def shirt_clear(attendee_id: int, request: Request, user: User = Depends(require_staff), db: Session = Depends(get_db)):
+    attendee = get_attendee_or_404(db, attendee_id)
+    attendee.shirt_missing = False
+    db.commit()
+    return card_response(request, attendee, "refreshStats")
 
 
 # ---- partial send: hand out only some of an order's tickets (the rest of the party arrives later)
@@ -1246,6 +1309,8 @@ def partial_ctx(attendee: Attendee, **extra) -> dict:
 def partial_form(attendee_id: int, request: Request, user: User = Depends(require_staff),
                  db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
+    if attendee.shirt_missing:
+        return oob_card(request, attendee, toast(LOCKED_MSG, "error"))
     return render(request, "partials/partial_form.html", partial_ctx(attendee))
 
 
@@ -1256,6 +1321,8 @@ async def partial_send(
     user: User = Depends(require_staff), db: Session = Depends(get_db),
 ):
     attendee = get_attendee_or_404(db, attendee_id)
+    if attendee.shirt_missing:
+        return oob_card(request, attendee, toast(LOCKED_MSG, "error"))
     event = db.get(Event, attendee.event_id)
     errors: list[str] = []
     try:

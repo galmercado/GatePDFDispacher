@@ -2678,3 +2678,51 @@ def test_ticket_files_are_deleted_a_month_after_the_event(client, admin, tmp_pat
     assert "deleted automatically" in admin.get(f"/events/{ids[0]}/manage").text
     monkeypatch.setattr(config, "TICKET_RETENTION_DAYS", 0)
     assert main_module.purge_old_tickets() == 0
+
+
+# --------------------------------------------------------------------------- shirt missing
+
+def test_shirt_missing_sends_flags_locks_and_admits_later(admin, doorman, event_id, wa):
+    att = party(admin, event_id)                                   # 3 tickets
+    card = doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    assert "Shirt missing" in card and f"/attendees/{att}/shirt-form" in card
+    form = doorman.get(f"/attendees/{att}/shirt-form")
+    assert form.status_code == 200 and "WhatsApp" in form.text and "QR" in form.text
+    r = doorman.post(f"/attendees/{att}/shirt-missing", data={"via": "whatsapp"})
+    assert 'hx-swap-oob="true"' in r.text and "ring-yellow-400/60" in r.text and "flagged" in r.headers["HX-Trigger"]
+    assert wa["sent"] == ["MSG1", "MSG2", "MSG3"]
+    assert admitted(att) == (0, 0, False, [True, True, True])      # sent, but NOT admitted
+    card = doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    assert "Admitted</button>" in card and "/whatsapp" not in card and "/partial-form" not in card and "Clear flag" in card
+    # locked: the normal actions are refused while flagged
+    assert "shirt missing" in doorman.post(f"/attendees/{att}/whatsapp").headers["HX-Trigger"]
+    assert doorman.get(f"/attendees/{att}/partial-form").headers["HX-Trigger"].count("shirt missing") == 1
+    assert doorman.post(f"/attendees/{att}/qr").status_code == 200 and admitted(att)[2] is False
+    assert wa["sent"] == ["MSG1", "MSG2", "MSG3"]
+    # someone presses Admitted: flag gone, everyone counted
+    doorman.post(f"/attendees/{att}/toggle")
+    assert admitted(att) == (2, 1, True, [True, True, True])
+    card = doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    assert "ring-yellow-400/60" not in card and "Shirt missing" not in card
+
+
+def test_shirt_missing_by_qr_and_clear_flag(admin, doorman, event_id, wa):
+    att = party(admin, event_id)
+    r = doorman.post(f"/attendees/{att}/shirt-missing", data={"via": "qr"})
+    assert "tickets.zip" in r.text and "Shirt missing" in r.text and "ring-yellow-400/60" in r.text
+    assert admitted(att) == (0, 0, False, [True, True, True])
+    doorman.post(f"/attendees/{att}/shirt-clear")
+    assert "ring-yellow-400/60" not in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    assert admitted(att)[2] is False
+
+
+def test_shirt_missing_whatsapp_failure_does_not_flag(admin, doorman, event_id, monkeypatch):
+    att = party(admin, event_id)
+
+    async def boom(*a, **k):
+        raise services.WhatsAppError("gateway down")
+
+    monkeypatch.setattr("app.main.send_tickets", boom)
+    r = doorman.post(f"/attendees/{att}/shirt-missing", data={"via": "whatsapp"})
+    assert "gateway down" in r.text
+    assert "ring-yellow-400/60" not in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
