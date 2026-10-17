@@ -163,7 +163,7 @@
       <button type="button" class="up-cancel mt-2 text-xs text-slate-400 underline hover:text-white">Cancel upload</button>
     </div>
   </form>
-  <form method="post" action="/events/{{ event.id }}/tickets/drive" class="mt-4 flex flex-col gap-3 border-t border-slate-800 pt-4">
+  <form method="post" action="/events/{{ event.id }}/tickets/drive" data-upload data-progress-url="/events/{{ event.id }}/tickets/drive-progress" class="mt-4 flex flex-col gap-3 border-t border-slate-800 pt-4">
     <label class="text-sm text-slate-400" for="drive-links"><i class="ph ph-google-drive-logo"></i> Or fetch from Google Drive - paste the link(s), one per line.
       The file must be shared as “Anyone with the link”.</label>
     <div class="flex flex-col gap-3 sm:flex-row">
@@ -174,6 +174,12 @@
     <label class="flex items-center gap-2 text-sm text-slate-400"><input type="checkbox" name="replace" class="h-4 w-4 rounded"
       onclick="if(this.checked&&!confirm('Replace ALL existing tickets and spare pages? Links already sent will stop working.')) this.checked=false">
       Start over: replace all existing tickets</label>
+    <div class="up hidden" aria-live="polite">
+      <div class="mb-1 flex justify-between text-xs text-slate-400"><span class="up-label">Fetching…</span><span class="up-pct font-semibold text-slate-200">0%</span></div>
+      <div class="h-2.5 overflow-hidden rounded-full bg-slate-800" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="up-bar h-full w-0 rounded-full bg-brand-500 transition-all duration-150"></div></div>
+      <button type="button" class="up-cancel mt-2 text-xs text-slate-400 underline hover:text-white">Cancel</button>
+    </div>
   </form>
   {% if event.tickets_purged_at %}<p class="mt-3 text-xs text-amber-300">The ticket files of this event were deleted automatically on {{ event.tickets_purged_at.strftime('%Y-%m-%d') }} (retention period over).</p>{% endif %}
 </section>
@@ -267,26 +273,40 @@
     const mb = (n) => (n / 1048576).toFixed(n > 10485760 ? 0 : 1) + ' MB';
     const set = (p) => { bar.style.width = p + '%'; pct.textContent = p + '%'; meter.setAttribute('aria-valuenow', p); };
     form.addEventListener('submit', (e) => {
-      if (!window.XMLHttpRequest || !window.FormData || !fileInput.files.length) return;
-      const file = fileInput.files[0], max = Number(form.dataset.maxMb) * 1048576;
+      if (!window.XMLHttpRequest || !window.FormData || (fileInput && !fileInput.files.length)) return;
+      const progressUrl = form.dataset.progressUrl, token = Math.random().toString(36).slice(2) + Date.now().toString(36);
+      const file = fileInput ? fileInput.files[0] : null, max = Number(form.dataset.maxMb) * 1048576;
       e.preventDefault();
-      if (file.size > max) { showToast('File is too large (' + mb(file.size) + '); the limit is ' + mb(max) + '.', 'error'); return; }
+      if (file && file.size > max) { showToast('File is too large (' + mb(file.size) + '); the limit is ' + mb(max) + '.', 'error'); return; }
       const xhr = new XMLHttpRequest();
-      const reset = () => { box.classList.add('hidden'); submit.disabled = false; submit.classList.remove('opacity-50'); };
+      const reset = () => { stopPoll(); box.classList.add('hidden'); submit.disabled = false; submit.classList.remove('opacity-50'); };
       submit.disabled = true; submit.classList.add('opacity-50');
-      box.classList.remove('hidden'); set(0); label.textContent = 'Uploading ' + file.name + ' (' + mb(file.size) + ')…';
+      box.classList.remove('hidden'); set(0); label.textContent = file ? 'Uploading ' + file.name + ' (' + mb(file.size) + ')…' : 'Fetching from Google Drive…';
+      let poll = null;
+      if (progressUrl) {      // Drive: the server downloads the file - show its progress
+        poll = setInterval(async () => {
+          try {
+            const j = await (await fetch(progressUrl + '?token=' + token, {credentials: 'same-origin'})).json();
+            set(j.pct);
+            if (j.stage === 'process') { label.textContent = 'Downloaded - processing, please wait…'; bar.classList.add('animate-pulse'); }
+            else label.textContent = 'Fetching from Google Drive… ' + j.pct + '%';
+          } catch (err) { /* keep trying */ }
+        }, 500);
+      }
+      const stopPoll = () => { if (poll) clearInterval(poll); };
       xhr.upload.onprogress = (ev) => {
         if (!ev.lengthComputable) return;
         const p = Math.min(100, Math.floor(ev.loaded * 100 / ev.total));
         set(p); label.textContent = 'Uploading… ' + mb(ev.loaded) + ' of ' + mb(ev.total);
       };
-      xhr.upload.onload = () => { set(100); label.textContent = 'Upload complete - processing, please wait…'; bar.classList.add('animate-pulse'); cancel.classList.add('hidden'); };
-      xhr.onload = () => { document.open(); document.write(xhr.responseText); document.close(); };   // show the result page
+      xhr.upload.onload = () => { if (progressUrl) return; set(100); label.textContent = 'Upload complete - processing, please wait…'; bar.classList.add('animate-pulse'); cancel.classList.add('hidden'); };
+      xhr.onload = () => { stopPoll(); document.open(); document.write(xhr.responseText); document.close(); };   // show the result page
       xhr.onerror = () => { reset(); showToast('Upload failed - check your connection and try again.', 'error'); };
       xhr.onabort = () => { reset(); showToast('Upload cancelled.', 'error'); };
       cancel.onclick = () => xhr.abort();
       xhr.open('POST', form.action);
-      xhr.send(new FormData(form));
+      const fd = new FormData(form); fd.append('token', token);
+      xhr.send(fd);
     });
   });
 </script>

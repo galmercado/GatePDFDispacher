@@ -98,7 +98,7 @@ def drive_file_id(link: str) -> str:
     return match.group(1)
 
 
-async def fetch_drive_pdf(link: str, client: httpx.AsyncClient | None = None) -> bytes:
+async def fetch_drive_pdf(link: str, client: httpx.AsyncClient | None = None, progress=None) -> bytes:
     """Download a PDF that is shared on Google Drive as 'anyone with the link'."""
     file_id = drive_file_id(link)
     own = client is None
@@ -109,8 +109,11 @@ async def fetch_drive_pdf(link: str, client: httpx.AsyncClient | None = None) ->
                 raise DriveError(f"Google Drive answered {resp.status_code} - is the file shared with "
                                  "“anyone with the link”?")
             body = bytearray()
+            total = int(resp.headers.get("content-length") or 0)
             async for chunk in resp.aiter_bytes():
                 body.extend(chunk)
+                if progress:
+                    progress(len(body), total)
                 if len(body) > config.MAX_PDF_BYTES:
                     raise DriveError(f"The file is too large ({config.MAX_PDF_BYTES // (1024 * 1024)} MB max).")
     except httpx.HTTPError as exc:

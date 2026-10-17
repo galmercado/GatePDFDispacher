@@ -789,9 +789,17 @@ async def upload_ticket_pdf(
     return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs))
 
 
+DRIVE_PROGRESS: dict[str, dict] = {}      # progress token -> {"pct": 0-100, "stage": "download" | "process"}
+
+
+@app.get("/events/{event_id}/tickets/drive-progress")
+def drive_progress(event_id: int, token: str = "", user: User = Depends(require_admin)):
+    return DRIVE_PROGRESS.get(token, {"pct": 0, "stage": "download"})
+
+
 @app.post("/events/{event_id}/tickets/drive", response_class=HTMLResponse)
 async def upload_tickets_from_drive(
-    event_id: int, request: Request, links: str = Form(""), replace: str = Form(""),
+    event_id: int, request: Request, links: str = Form(""), replace: str = Form(""), token: str = Form(""),
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     """Fetch ticket PDFs from Google Drive share links (one per line; the files must be shared with 'anyone with the link')."""
@@ -800,15 +808,28 @@ async def upload_tickets_from_drive(
     if not urls:
         return render(request, "manage.html", manage_ctx(db, user, event, errors=["Paste a Google Drive link."]), status=422)
     msgs, errors = [], []
+    token = re.sub(r"[^\w-]", "", token)[:40]
+    if len(DRIVE_PROGRESS) > 200:
+        DRIVE_PROGRESS.clear()
+
+    def report(index: int, stage: str = "download"):
+        def callback(done: int = 0, total: int = 0):
+            share = (done / total) if total else 0
+            DRIVE_PROGRESS[token] = {"pct": min(100, int((index + share) * 100 / len(urls))), "stage": stage}
+        return callback
+
     for index, url in enumerate(urls):
         try:
-            content = await fetch_drive_pdf(url)
+            content = await fetch_drive_pdf(url, progress=report(index) if token else None)
+            if token:
+                report(index + 1, "process")()
             result = add_ticket_pdf(db, event.id, content, replace=replace == "on" and index == 0)
         except (DriveError, PdfProcessingError) as exc:
             errors.append(f"{url[:70]}: {exc}")
             continue
         msgs.append(f"Drive file {index + 1}: added {result['pages']} page(s); assigned {result['assigned']} ticket(s) to guests."
                     + (f" {result['spare']} spare." if result["spare"] else ""))
+    DRIVE_PROGRESS.pop(token, None)
     return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, errors=errors),
                   status=422 if errors and not msgs else 200)
 

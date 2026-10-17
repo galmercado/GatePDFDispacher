@@ -2592,7 +2592,7 @@ def test_drive_links_and_download():
 def test_drive_form_adds_tickets(client, admin, event_id, monkeypatch):
     from app import main as main_module
 
-    async def fake_fetch(link, client=None):
+    async def fake_fetch(link, client=None, progress=None):
         if "bad" in link:
             raise main_module.DriveError("not shared")
         return make_pdf(2)
@@ -2602,6 +2602,8 @@ def test_drive_form_adds_tickets(client, admin, event_id, monkeypatch):
                    data={"links": "https://drive.google.com/file/d/goodgoodgood1/view\nhttps://drive.google.com/file/d/badbadbadbad/view"})
     assert r.status_code == 200 and "added 2 page(s)" in r.text and "not shared" in r.text
     assert admin.post(f"/events/{event_id}/tickets/drive", data={"links": " "}).status_code == 422
+    assert admin.get(f"/events/{event_id}/tickets/drive-progress?token=zzz").json() == {"pct": 0, "stage": "download"}
+    assert "data-progress-url" in admin.get(f"/events/{event_id}/manage").text
 
 
 @pytest.fixture()
