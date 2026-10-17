@@ -2876,6 +2876,9 @@ def test_delivery_webhook_flags_undelivered_tickets_and_fails_a_line_after_repea
     with SessionLocal() as db:
         msgs = db.query(SentMessage).filter_by(attendee_id=att).order_by(SentMessage.id).all()
         instance = db.get(WhatsAppLine, msgs[0].line_id).instance_name
+        for i, m in enumerate(msgs):                 # the fake gateway reuses MSG1.. across tests; real WhatsApp ids are unique
+            m.message_id = f"HOOK{att}X{i}"
+        db.commit()
         ids = [m.message_id for m in msgs]
         line_id = msgs[0].line_id
         db.get(WhatsAppLine, line_id).fail_streak = 0

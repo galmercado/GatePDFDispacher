@@ -335,7 +335,8 @@ def apply_delivery_update(db: Session, instance: str, key_id: str, status: str) 
     DELIVERY_ACK/READ/PLAYED -> the message arrived: the line's failure streak starts over and the flag is cleared."""
     status = str(status or "").upper()
     line = db.query(WhatsAppLine).filter(WhatsAppLine.instance_name == instance).first()
-    msg = db.query(SentMessage).filter(SentMessage.message_id == key_id).first() if key_id else None
+    msg = (db.query(SentMessage).filter(SentMessage.message_id == key_id).order_by(SentMessage.id.desc()).first()
+           if key_id else None)
     ticket = db.get(Ticket, msg.ticket_id) if msg is not None and msg.ticket_id else None
     if status == "ERROR":
         if ticket is not None:
