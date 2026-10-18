@@ -4,6 +4,7 @@ import hashlib
 import io
 import logging
 import re
+import threading
 from datetime import datetime
 from difflib import SequenceMatcher
 
@@ -82,6 +83,9 @@ def compress_writer(writer: PdfWriter) -> None:
 
 # --------------------------------------------------------------------------- QR codes and hashes
 
+_PDFIUM_LOCK = threading.Lock()        # pdfium is not thread-safe
+
+
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -96,11 +100,12 @@ def read_codes(pdf_bytes: bytes) -> str | None:
     except ImportError:
         return None
     try:
-        doc = pypdfium2.PdfDocument(pdf_bytes)
-        try:
-            image = doc[0].render(scale=config.QR_RENDER_SCALE).to_pil()
-        finally:
-            doc.close()
+        with _PDFIUM_LOCK:
+            doc = pypdfium2.PdfDocument(pdf_bytes)
+            try:
+                image = doc[0].render(scale=config.QR_RENDER_SCALE).to_pil()
+            finally:
+                doc.close()
         found = sorted({r.text for r in zxingcpp.read_barcodes(image) if r.text})
     except Exception as exc:
         log.warning("Could not read the codes of a page: %s", exc)

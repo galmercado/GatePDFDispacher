@@ -87,7 +87,7 @@
     </ol>
     <div id="paste-zone" tabindex="0" class="mt-3 rounded-xl border-2 border-dashed border-slate-600 py-4 text-center text-sm text-slate-400 outline-none focus:border-brand-400">
       <i class="ph ph-clipboard-text text-2xl"></i><p id="paste-status">Waiting for the paste (Ctrl+V)…</p></div>
-    <form id="paste-form" method="post" action="/events/{{ event.id }}/registration/upload" class="hidden"><textarea name="html" id="paste-html"></textarea></form>
+    <form id="paste-form" method="post" action="/events/{{ event.id }}/registration/upload" data-progress="Importing the reservations" class="hidden"><textarea name="html" id="paste-html"></textarea></form>
   </div>
   {% else %}
   <p class="rounded-xl border border-dashed border-slate-700 p-3 text-sm text-slate-400">Enter the game ID above to continue.</p>
@@ -106,7 +106,7 @@
     <summary class="cursor-pointer list-none p-3 text-sm font-medium text-slate-200"><i class="ph ph-key text-brand-400"></i> Other ways: session cookie, saved page {% if has_cookie %}<span class="ml-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-emerald-300">cookie saved</span>{% endif %}</summary>
     <div class="border-t border-slate-800 p-3 text-sm text-slate-400">
       {% if event.external_id %}
-      <form method="post" action="/events/{{ event.id }}/registration/fetch" class="mb-3">
+      <form method="post" action="/events/{{ event.id }}/registration/fetch" data-progress="Importing from the registration site" class="mb-3">
         <button class="flex w-full items-center justify-center gap-2 rounded-xl bg-brand-500 py-2.5 font-semibold text-white hover:bg-brand-600 {{ 'opacity-60' if not has_cookie }}"><i class="ph-bold ph-cloud-arrow-down"></i> Fetch &amp; import game {{ event.external_id }} with the saved cookie</button></form>
       {% endif %}
       <form method="post" action="/registration/cookie" class="mb-4 grid gap-2">
@@ -115,7 +115,7 @@
         <div class="flex gap-2"><button class="rounded-xl bg-slate-800 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700">Save cookie</button>
           {% if has_cookie %}<button name="clear" value="1" formnovalidate class="rounded-xl border border-rose-500/40 px-4 py-2 text-sm text-rose-300 hover:bg-rose-500/10">Remove cookie</button>{% endif %}</div>
       </form>
-      <form method="post" action="/events/{{ event.id }}/registration/upload" enctype="multipart/form-data" class="grid gap-2">
+      <form method="post" action="/events/{{ event.id }}/registration/upload" enctype="multipart/form-data" data-progress="Importing the saved page" class="grid gap-2">
         <p>Or upload the page saved from the browser (<i>Save page as…</i>, HTML):</p>
         <input type="file" name="file" accept=".html,.htm,text/html" class="rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-2.5 file:text-slate-200">
         <button class="rounded-xl bg-slate-800 py-2.5 text-sm font-semibold text-white hover:bg-slate-700"><i class="ph-bold ph-upload-simple"></i> Import page</button>
@@ -127,17 +127,11 @@
   <h2 class="mb-1 flex items-center gap-2 font-semibold text-white"><i class="ph ph-users-three text-brand-400"></i> 1. Import guest list</h2>
   <p class="mb-3 text-sm text-slate-400">.xlsx or .json. Columns: <code class="text-slate-300">name, phone</code> (required),
     <code class="text-slate-300">category</code> (חבר ארגון / מצטרף / פלוס / פתוח; default פתוח), <code class="text-slate-300">adult</code> / <code class="text-slate-300">מבוגר</code> and <code class="text-slate-300">youth</code> / <code class="text-slate-300">נוער</code> ticket counts (a legacy <code class="text-slate-300">tickets</code> column counts as adults), <code class="text-slate-300">email, age, notes</code>. Valid rows are imported right away; rows with problems are listed so you can fix or skip them. Age may be a decimal (20.5).</p>
-  <form method="post" action="/events/{{ event.id }}/attendees/import" enctype="multipart/form-data" data-upload data-max-mb="{{ max_list_mb }}" class="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+  <form method="post" action="/events/{{ event.id }}/attendees/import" enctype="multipart/form-data" data-progress="Importing the guest list" data-max-mb="{{ max_list_mb }}" class="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
     <input type="file" name="file" accept=".xlsx,.json" required
            class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-3 file:text-slate-200">
     <button class="flex items-center justify-center gap-2 rounded-xl bg-brand-500 px-5 py-3 text-sm font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-upload-simple"></i> Import</button>
     <div class="basis-full">
-    <div class="up mt-1 hidden" aria-live="polite">
-      <div class="mb-1 flex justify-between text-xs text-slate-400"><span class="up-label">Uploading…</span><span class="up-pct font-semibold text-slate-200">0%</span></div>
-      <div class="h-2.5 overflow-hidden rounded-full bg-slate-800" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <div class="up-bar h-full w-0 rounded-full bg-brand-500 transition-all duration-150"></div></div>
-      <button type="button" class="up-cancel mt-2 text-xs text-slate-400 underline hover:text-white">Cancel upload</button>
-    </div>
     </div>
   </form>
 </section>
@@ -147,7 +141,7 @@
   <p class="mb-3 text-sm text-slate-400">One page per ticket ({{ stats.total }} needed for the current list). Pages are assigned automatically to guests
     who don't have a ticket yet. You can upload more PDFs later - for late guests or top-ups - and they are added to the pool.
     {% if spare_pages %}<span class="text-slate-300">{{ spare_pages }} spare page(s) waiting.</span>{% endif %}</p>
-  <form method="post" action="/events/{{ event.id }}/tickets/upload" enctype="multipart/form-data" data-upload data-max-mb="{{ max_pdf_mb }}" class="flex flex-col gap-3">
+  <form method="post" action="/events/{{ event.id }}/tickets/upload" enctype="multipart/form-data" data-progress="Adding the ticket pages" data-max-mb="{{ max_pdf_mb }}" class="flex flex-col gap-3">
     <div class="flex flex-col gap-3 sm:flex-row">
       <input type="file" name="file" accept="application/pdf,.pdf" required
              class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-3 file:text-slate-200">
@@ -156,14 +150,8 @@
     <label class="flex items-center gap-2 text-sm text-slate-400"><input type="checkbox" name="replace" class="h-4 w-4 rounded"
       onclick="if(this.checked&&!confirm('Replace ALL existing tickets and spare pages with this PDF? Links already sent will stop working.')) this.checked=false">
       Start over: replace all existing tickets</label>
-    <div class="up mt-1 hidden" aria-live="polite">
-      <div class="mb-1 flex justify-between text-xs text-slate-400"><span class="up-label">Uploading…</span><span class="up-pct font-semibold text-slate-200">0%</span></div>
-      <div class="h-2.5 overflow-hidden rounded-full bg-slate-800" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <div class="up-bar h-full w-0 rounded-full bg-brand-500 transition-all duration-150"></div></div>
-      <button type="button" class="up-cancel mt-2 text-xs text-slate-400 underline hover:text-white">Cancel upload</button>
-    </div>
   </form>
-  <form method="post" action="/events/{{ event.id }}/tickets/drive" data-upload data-progress-url="/events/{{ event.id }}/tickets/drive-progress" class="mt-4 flex flex-col gap-3 border-t border-slate-800 pt-4">
+  <form method="post" action="/events/{{ event.id }}/tickets/drive" data-progress="Fetching tickets from Google Drive" class="mt-4 flex flex-col gap-3 border-t border-slate-800 pt-4">
     <label class="text-sm text-slate-400" for="drive-links"><i class="ph ph-google-drive-logo"></i> Or fetch from Google Drive - paste the link(s), one per line.
       The file must be shared as “Anyone with the link”.</label>
     <div class="flex flex-col gap-3 sm:flex-row">
@@ -174,16 +162,12 @@
     <label class="flex items-center gap-2 text-sm text-slate-400"><input type="checkbox" name="replace" class="h-4 w-4 rounded"
       onclick="if(this.checked&&!confirm('Replace ALL existing tickets and spare pages? Links already sent will stop working.')) this.checked=false">
       Start over: replace all existing tickets</label>
-    <div class="up hidden" aria-live="polite">
-      <div class="mb-1 flex justify-between text-xs text-slate-400"><span class="up-label">Fetching…</span><span class="up-pct font-semibold text-slate-200">0%</span></div>
-      <div class="h-2.5 overflow-hidden rounded-full bg-slate-800" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <div class="up-bar h-full w-0 rounded-full bg-brand-500 transition-all duration-150"></div></div>
-      <button type="button" class="up-cancel mt-2 text-xs text-slate-400 underline hover:text-white">Cancel</button>
-    </div>
   </form>
   <div class="mt-3 border-t border-slate-800 pt-3">
-    <a href="/events/{{ event.id }}/tickets/audit" class="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"><i class="ph ph-shield-check"></i> Check tickets for duplicates</a>
-    <span class="ml-2 text-xs text-slate-500">Re-reads every stored page and its QR code.</span>
+    <form method="post" action="/events/{{ event.id }}/tickets/audit" data-progress="Checking the ticket pages" class="flex flex-wrap items-center gap-2">
+      <button class="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"><i class="ph ph-shield-check"></i> Check tickets for duplicates</button>
+      <span class="text-xs text-slate-500">Re-reads every stored page and its QR code.</span>
+    </form>
   </div>
   {% if audit %}
   <div class="mt-3 rounded-xl border p-3 text-sm {{ 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200' if audit.ok else 'border-rose-500/40 bg-rose-500/10 text-rose-100' }}">
@@ -280,52 +264,6 @@
 <a href="/events/{{ event.id }}/door" class="mt-5 flex items-center justify-center gap-2 rounded-xl bg-emerald-500/15 py-3 font-semibold text-emerald-300 hover:bg-emerald-500/25">
   <i class="ph-bold ph-scan"></i> Open door cockpit</a>
 
-<script>
-  // Upload with a live progress bar (falls back to a normal form post if anything is missing).
-  document.querySelectorAll('form[data-upload]').forEach((form) => {
-    const box = form.querySelector('.up'), bar = form.querySelector('.up-bar'), pct = form.querySelector('.up-pct'),
-          label = form.querySelector('.up-label'), meter = bar.parentElement, cancel = form.querySelector('.up-cancel'),
-          submit = form.querySelector('button:not([type=button])'), fileInput = form.querySelector('input[type=file]');
-    const mb = (n) => (n / 1048576).toFixed(n > 10485760 ? 0 : 1) + ' MB';
-    const set = (p) => { bar.style.width = p + '%'; pct.textContent = p + '%'; meter.setAttribute('aria-valuenow', p); };
-    form.addEventListener('submit', (e) => {
-      if (!window.XMLHttpRequest || !window.FormData || (fileInput && !fileInput.files.length)) return;
-      const progressUrl = form.dataset.progressUrl, token = Math.random().toString(36).slice(2) + Date.now().toString(36);
-      const file = fileInput ? fileInput.files[0] : null, max = Number(form.dataset.maxMb) * 1048576;
-      e.preventDefault();
-      if (file && file.size > max) { showToast('File is too large (' + mb(file.size) + '); the limit is ' + mb(max) + '.', 'error'); return; }
-      const xhr = new XMLHttpRequest();
-      const reset = () => { stopPoll(); box.classList.add('hidden'); submit.disabled = false; submit.classList.remove('opacity-50'); };
-      submit.disabled = true; submit.classList.add('opacity-50');
-      box.classList.remove('hidden'); set(0); label.textContent = file ? 'Uploading ' + file.name + ' (' + mb(file.size) + ')…' : 'Fetching from Google Drive…';
-      let poll = null;
-      if (progressUrl) {      // Drive: the server downloads the file - show its progress
-        poll = setInterval(async () => {
-          try {
-            const j = await (await fetch(progressUrl + '?token=' + token, {credentials: 'same-origin'})).json();
-            set(j.pct);
-            if (j.stage === 'process') { label.textContent = 'Downloaded - processing, please wait…'; bar.classList.add('animate-pulse'); }
-            else label.textContent = 'Fetching from Google Drive… ' + j.pct + '%';
-          } catch (err) { /* keep trying */ }
-        }, 500);
-      }
-      const stopPoll = () => { if (poll) clearInterval(poll); };
-      xhr.upload.onprogress = (ev) => {
-        if (!ev.lengthComputable) return;
-        const p = Math.min(100, Math.floor(ev.loaded * 100 / ev.total));
-        set(p); label.textContent = 'Uploading… ' + mb(ev.loaded) + ' of ' + mb(ev.total);
-      };
-      xhr.upload.onload = () => { if (progressUrl) return; set(100); label.textContent = 'Upload complete - processing, please wait…'; bar.classList.add('animate-pulse'); cancel.classList.add('hidden'); };
-      xhr.onload = () => { stopPoll(); document.open(); document.write(xhr.responseText); document.close(); };   // show the result page
-      xhr.onerror = () => { reset(); showToast('Upload failed - check your connection and try again.', 'error'); };
-      xhr.onabort = () => { reset(); showToast('Upload cancelled.', 'error'); };
-      cancel.onclick = () => xhr.abort();
-      xhr.open('POST', form.action);
-      const fd = new FormData(form); fd.append('token', token);
-      xhr.send(fd);
-    });
-  });
-</script>
 
 <script>
   // Open the registration site in a popup; a page copied there (Ctrl+A, Ctrl+C) is imported on paste here.
@@ -344,7 +282,7 @@
       const tables = [...doc.querySelectorAll('table')].sort((a, b) => b.rows.length - a.rows.length);
       document.getElementById('paste-html').value = (tables[0] || doc.body).outerHTML;
       status.textContent = 'Importing ' + tables[0].rows.length + ' rows…'; zone.classList.add('border-brand-400', 'animate-pulse');
-      document.getElementById('paste-form').submit();
+      document.getElementById('paste-form').requestSubmit();
     });
   })();
 </script>

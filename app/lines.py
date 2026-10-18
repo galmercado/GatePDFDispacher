@@ -257,7 +257,7 @@ async def test_one(db: Session, line: WhatsAppLine, state_fn=None, text_fn=None,
     return passed
 
 
-async def run_line_tests(db: Session, state_fn=None, text_fn=None, phone_fn=None, profile_fn=None) -> dict:
+async def run_line_tests(db: Session, state_fn=None, text_fn=None, phone_fn=None, profile_fn=None, progress=None) -> dict:
     """Test every line that is not disabled, one by one with random pauses.
 
     The lines talk to each other: each one messages the next connected line in a ring (so every number both sends and
@@ -267,7 +267,9 @@ async def run_line_tests(db: Session, state_fn=None, text_fn=None, phone_fn=None
     state_fn, text_fn = state_fn or evolution_state, text_fn or send_whatsapp_text
     lines = db.query(WhatsAppLine).filter(WhatsAppLine.status != "disabled").order_by(
         WhatsAppLine.priority, WhatsAppLine.id).all()
-    for line in lines:                                   # who is connected, and what are their numbers? (no WhatsApp traffic)
+    for number, line in enumerate(lines, start=1):       # who is connected, and what are their numbers? (no WhatsApp traffic)
+        if progress:
+            progress(0.2 * (number - 1) / max(1, len(lines)), f"Checking the connection of {line.label}")
         try:
             line.connection = await state_fn(line.instance_name)
             if line.connection == "open":
@@ -279,6 +281,8 @@ async def run_line_tests(db: Session, state_fn=None, text_fn=None, phone_fn=None
     fallback = test_number(db)
     ok = bad = 0
     for i, line in enumerate(lines):
+        if progress:
+            progress(0.2 + 0.8 * i / max(1, len(lines)), f"Testing {line.label} ({i + 1} of {len(lines)})")
         if i:
             await asyncio.sleep(random.uniform(*config.LINE_TEST_GAP))
         partner = partner_for(line, peers)

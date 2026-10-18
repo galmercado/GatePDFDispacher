@@ -58,6 +58,22 @@
   <main class="mx-auto max-w-3xl px-4 pb-24 pt-5">{% block content %}{% endblock %}</main>
   {% endblock %}
 
+  <dialog id="progress-modal" class="w-[calc(100%-2rem)] max-w-xs rounded-2xl border border-slate-700 bg-slate-900 p-0 text-slate-200 backdrop:bg-black/70 backdrop:backdrop-blur-sm" aria-live="polite">
+    <div class="p-6 text-center">
+      <div class="relative mx-auto h-36 w-36">
+        <svg viewBox="0 0 120 120" class="h-36 w-36 -rotate-90" aria-hidden="true">
+          <circle cx="60" cy="60" r="52" fill="none" stroke="#1e293b" stroke-width="10"/>
+          <circle id="pg-ring" cx="60" cy="60" r="52" fill="none" stroke="#2dd4bf" stroke-width="10" stroke-linecap="round"
+                  stroke-dasharray="326.73" stroke-dashoffset="326.73" style="transition: stroke-dashoffset .35s ease"/>
+        </svg>
+        <span id="pg-pct" class="absolute inset-0 flex items-center justify-center text-4xl font-bold text-white" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">0%</span>
+      </div>
+      <h2 id="pg-title" class="mt-4 text-lg font-semibold text-white">Working…</h2>
+      <p id="pg-label" class="mt-1 min-h-[2.5rem] text-sm text-slate-400"></p>
+      <button type="button" id="pg-cancel" class="mt-3 hidden text-xs text-slate-400 underline hover:text-white">Cancel</button>
+    </div>
+  </dialog>
+
   <div id="toasts" class="pointer-events-none fixed inset-x-0 bottom-4 z-50 flex flex-col items-center gap-2 px-4" aria-live="polite"></div>
 
   <script>
@@ -80,6 +96,90 @@
       showToast(e.detail.xhr.responseText || 'Request failed', 'error');
     });
     document.body.addEventListener('htmx:sendError', () => showToast('Network error - check your connection', 'error'));
+  </script>
+
+  <script>
+    // Percentage popup for long actions. A form or htmx element with data-progress="Title" shows it; the server reports its
+    // progress under a random job token (GET /jobs/<token>). It only appears if the action takes longer than a moment.
+    window.Progress = (function () {
+      const dlg = document.getElementById('progress-modal'), ring = document.getElementById('pg-ring'),
+            pct = document.getElementById('pg-pct'), label = document.getElementById('pg-label'),
+            title = document.getElementById('pg-title'), cancel = document.getElementById('pg-cancel');
+      const C = 326.73;
+      let shown = 0, base = 0, showTimer = null, pollTimer = null, token = '', onCancel = null;
+      dlg.addEventListener('cancel', (e) => e.preventDefault());
+      cancel.addEventListener('click', () => { if (onCancel) onCancel(); });
+      function paint(p) {
+        shown = Math.max(shown, Math.min(100, Math.round(p)));
+        ring.style.strokeDashoffset = C * (1 - shown / 100);
+        pct.textContent = shown + '%'; pct.setAttribute('aria-valuenow', shown);
+      }
+      async function poll() {
+        try {
+          const r = await fetch('/jobs/' + token, { credentials: 'same-origin', cache: 'no-store' });
+          if (!r.ok) return;
+          const j = await r.json();
+          paint(base + (100 - base) * j.pct / 100);
+          if (j.label) label.textContent = j.label;
+        } catch (err) { /* try again */ }
+      }
+      return {
+        newToken: () => Math.random().toString(36).slice(2, 12) + Date.now().toString(36),
+        begin(opts) {
+          this.end(true);
+          shown = 0; base = opts.base || 0; token = opts.token; onCancel = opts.onCancel || null;
+          paint(0); title.textContent = opts.title || 'Working…'; label.textContent = opts.label || '';
+          cancel.classList.toggle('hidden', !onCancel);
+          showTimer = setTimeout(() => { if (!dlg.open) dlg.showModal(); }, opts.delay === undefined ? 350 : opts.delay);
+          if (token) pollTimer = setInterval(poll, 450);
+        },
+        upload(p, text) { paint(p * base / 100); if (text) label.textContent = text; },
+        text(t) { label.textContent = t; },
+        end(quick) {
+          clearTimeout(showTimer); clearInterval(pollTimer); showTimer = pollTimer = null; onCancel = null;
+          if (quick) { if (dlg.open) dlg.close(); return; }
+          paint(100);
+          setTimeout(() => { if (dlg.open) dlg.close(); }, 300);
+        },
+      };
+    })();
+
+    // forms (full page results): submitted in the background so the ring can follow the upload and the processing
+    document.addEventListener('submit', (e) => {
+      const form = e.target.closest ? e.target.closest('form[data-progress]') : null;
+      if (!form || e.defaultPrevented || form.hasAttribute('hx-post') || !window.XMLHttpRequest || !window.FormData) return;
+      const fileInput = form.querySelector('input[type=file]');
+      if (fileInput && !fileInput.files.length) return;                      // nothing to upload: normal submit / browser validation
+      const file = fileInput ? fileInput.files[0] : null, token = Progress.newToken();
+      const mb = (n) => (n / 1048576).toFixed(n > 10485760 ? 0 : 1) + ' MB';
+      if (file && form.dataset.maxMb && file.size > Number(form.dataset.maxMb) * 1048576) {
+        e.preventDefault(); showToast('File is too large (' + mb(file.size) + '); the limit is ' + form.dataset.maxMb + ' MB.', 'error'); return;
+      }
+      e.preventDefault();
+      const xhr = new XMLHttpRequest();
+      Progress.begin({ title: form.dataset.progress, token, base: file ? 30 : 0, onCancel: () => xhr.abort(),
+                       label: file ? 'Uploading ' + file.name + ' (' + mb(file.size) + ')…' : 'Starting…' });
+      if (file) {
+        xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) Progress.upload(ev.loaded * 100 / ev.total, 'Uploading… ' + mb(ev.loaded) + ' of ' + mb(ev.total)); };
+        xhr.upload.onload = () => { Progress.upload(100, 'Upload complete - processing…'); };
+      }
+      xhr.onload = () => { Progress.end(); setTimeout(() => { document.open(); document.write(xhr.responseText); document.close(); }, 320); };
+      xhr.onerror = () => { Progress.end(true); showToast('The action failed - check your connection and try again.', 'error'); };
+      xhr.onabort = () => { Progress.end(true); showToast('Cancelled.', 'error'); };
+      const body = new FormData(form); body.append('job', token);
+      xhr.open('POST', form.action); xhr.send(body);
+    });
+
+    // htmx buttons / forms (door cards, popups): same popup, the page behind is updated by htmx afterwards
+    function progressEl(elt) { return elt && elt.closest ? elt.closest('[data-progress]') : null; }
+    function jobFor(elt) { const el = progressEl(elt); if (!el) return null; if (!el._job) el._job = Progress.newToken(); return el; }
+    document.body.addEventListener('htmx:configRequest', (e) => { const el = jobFor(e.detail.elt); if (el) e.detail.parameters['job'] = el._job; });
+    document.body.addEventListener('htmx:beforeRequest', (e) => {
+      const el = jobFor(e.detail.elt); if (el) Progress.begin({ title: el.dataset.progress, token: el._job });
+    });
+    document.body.addEventListener('htmx:afterRequest', (e) => {
+      const el = progressEl(e.detail.elt); if (el && el._job) { Progress.end(); el._job = null; }
+    });
   </script>
   {% block scripts %}{% endblock %}
 </body>

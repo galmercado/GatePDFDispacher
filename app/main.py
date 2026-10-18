@@ -35,6 +35,7 @@ from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
 from .models import AppSetting, Attendee, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Member, TicketBundle, Ticket, User, utcnow
 from .messages import ticket_caption
+from .progress import Reporter, status as job_status
 from .pdfs import DriveError, fetch_drive_pdf, parse_ticket_header, read_ticket_meta
 from .services import (
     AttendeeIn, ImportValidationError, describe_validation_error, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
@@ -569,23 +570,28 @@ def upload_url_visited_directly(event_id: int, user: User = Depends(require_admi
 
 @app.post("/events/{event_id}/attendees/import", response_class=HTMLResponse)
 async def import_guest_list(
-    event_id: int, request: Request, file: UploadFile = File(...),
+    event_id: int, request: Request, file: UploadFile = File(...), job: str = Form(""),
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     event = get_event_or_404(db, event_id)
     content = await file.read(config.MAX_LIST_BYTES + 1)
+    report = Reporter(job)
     try:
         if len(content) > config.MAX_LIST_BYTES:
             raise ImportValidationError(["File is too large (5 MB max)"])
-        parsed = parse_guest_list(file.filename or "", content, member_book(db))
+        report(0.05, "Reading the file")
+        parsed = await asyncio.to_thread(parse_guest_list, file.filename or "", content, member_book(db))
     except ImportValidationError as exc:
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=exc.errors[:50]), status=422)
-    return finish_import(request, db, user, event, parsed)
+    return await finish_import(request, db, user, event, parsed, report=report)
 
 
-def finish_import(request: Request, db: Session, user: User, event: Event, parsed, source: str = "") -> HTMLResponse:
-    msgs, warnings = run_import(db, event, parsed, source)
+async def finish_import(request: Request, db: Session, user: User, event: Event, parsed, source: str = "",
+                        report: Reporter | None = None) -> HTMLResponse:
+    report = report or Reporter()
+    msgs, warnings = await asyncio.to_thread(run_import, db, event, parsed, source, report.part(0.1, 1.0))
+    report.done()
     return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, warnings=warnings))
 
 
@@ -603,10 +609,12 @@ def fill_member_phone(db: Session, name: str, phone: str, category: str = "") ->
     return member_book(db).lookup(name) or phone
 
 
-def run_import(db: Session, event: Event, parsed, source: str = "") -> tuple[list[str], list[str]]:
+def run_import(db: Session, event: Event, parsed, source: str = "", progress=None) -> tuple[list[str], list[str]]:
     """Save the valid rows (adding new guests, updating existing ones), park the bad rows for fix-or-skip and
     hand out spare ticket PDFs. Returns (messages, warnings)."""
-    outcome = import_attendees(db, event.id, parsed.valid)
+    outcome = import_attendees(db, event.id, parsed.valid, progress=(lambda f, label=None: progress(0.85 * f, label)) if progress else None)
+    if progress:
+        progress(0.9, "Giving spare ticket pages to the new guests")
     for issue in parsed.issues:
         db.add(ImportIssue(event_id=event.id, label=issue.label, data=json.dumps(issue.row, ensure_ascii=False),
                            errors=json.dumps(issue.errors, ensure_ascii=False)))
@@ -673,31 +681,36 @@ def save_registration_cookie(request: Request, event_id: int = Form(...), cookie
 
 
 @app.post("/events/{event_id}/registration/fetch", response_class=HTMLResponse)
-async def fetch_registration(event_id: int, request: Request, user: User = Depends(require_admin),
+async def fetch_registration(event_id: int, request: Request, job: str = Form(""), user: User = Depends(require_admin),
                              db: Session = Depends(get_db)):
     event = get_event_or_404(db, event_id)
+    report = Reporter(job)
     try:
+        report(0.02, "Downloading the reservations page")
         page = await fetch_registration_page(event.external_id or "", registration_cookie(db))
-        parsed = parse_registration_html(page, member_book(db))
+        report(0.07, "Reading the table")
+        parsed = await asyncio.to_thread(parse_registration_html, page, member_book(db))
     except (RegistrationError, ImportValidationError) as exc:
         errors = exc.errors if isinstance(exc, ImportValidationError) else [str(exc)]
         return render(request, "manage.html", manage_ctx(db, user, event, errors=errors), status=422)
-    return finish_import(request, db, user, event, parsed, source=f"Registration #{event.external_id}: ")
+    return await finish_import(request, db, user, event, parsed, source=f"Registration #{event.external_id}: ", report=report)
 
 
 @app.post("/events/{event_id}/registration/upload", response_class=HTMLResponse)
 async def upload_registration_page(event_id: int, request: Request, file: UploadFile = File(None), html: str = Form(""),
-                                   user: User = Depends(require_admin), db: Session = Depends(get_db)):
+                                   job: str = Form(""), user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Fallback without any credentials: a page saved from the browser ("Save as...") or pasted HTML."""
     event = get_event_or_404(db, event_id)
     content = (await file.read(config.MAX_REGISTRATION_BYTES + 1)) if file is not None and file.filename else html.encode()
     try:
         if len(content) > config.MAX_REGISTRATION_BYTES:
             raise RegistrationError("The page is too large")
-        parsed = parse_registration_html(content, member_book(db))
+        report = Reporter(job)
+        report(0.05, "Reading the table")
+        parsed = await asyncio.to_thread(parse_registration_html, content, member_book(db))
     except RegistrationError as exc:
         return render(request, "manage.html", manage_ctx(db, user, event, errors=[str(exc)]), status=422)
-    return finish_import(request, db, user, event, parsed, source="Saved page: ")
+    return await finish_import(request, db, user, event, parsed, source="Saved page: ", report=report)
 
 
 def get_issue_or_404(db: Session, issue_id: int) -> ImportIssue:
@@ -792,35 +805,35 @@ def upload_notes(result: dict) -> list[str]:
 
 @app.post("/events/{event_id}/tickets/upload", response_class=HTMLResponse)
 async def upload_ticket_pdf(
-    event_id: int, request: Request, file: UploadFile = File(...), replace: str = Form(""),
+    event_id: int, request: Request, file: UploadFile = File(...), replace: str = Form(""), job: str = Form(""),
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     event = get_event_or_404(db, event_id)
     content = await file.read(config.MAX_PDF_BYTES + 1)
+    report = Reporter(job)
     try:
         if len(content) > config.MAX_PDF_BYTES:
             raise PdfProcessingError(f"File is too large ({config.MAX_PDF_BYTES // (1024 * 1024)} MB max)")
-        result = add_ticket_pdf(db, event.id, content, replace=replace == "on")
+        result = await asyncio.to_thread(add_ticket_pdf, db, event.id, content, replace == "on", report)
     except PdfProcessingError as exc:
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=[str(exc)]), status=422)
+    report.done()
     msgs = [f"Added {result['pages']} page(s); assigned {result['assigned']} ticket(s) to guests."]
     if result["spare"]:
         msgs.append(f"{result['spare']} spare page(s) are waiting for new guests.")
     return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, warnings=upload_notes(result)))
 
 
-DRIVE_PROGRESS: dict[str, dict] = {}      # progress token -> {"pct": 0-100, "stage": "download" | "process"}
-
-
-@app.get("/events/{event_id}/tickets/drive-progress")
-def drive_progress(event_id: int, token: str = "", user: User = Depends(require_admin)):
-    return DRIVE_PROGRESS.get(token, {"pct": 0, "stage": "download"})
+@app.get("/jobs/{token}")
+def job_progress(token: str, user: User = Depends(require_staff)):
+    """Progress of a long action (the browser polls this to draw the percentage ring)."""
+    return JSONResponse(job_status(token), headers={"Cache-Control": "no-store"})
 
 
 @app.post("/events/{event_id}/tickets/drive", response_class=HTMLResponse)
 async def upload_tickets_from_drive(
-    event_id: int, request: Request, links: str = Form(""), replace: str = Form(""), token: str = Form(""),
+    event_id: int, request: Request, links: str = Form(""), replace: str = Form(""), job: str = Form(""),
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     """Fetch ticket PDFs from Google Drive share links (one per line; the files must be shared with 'anyone with the link')."""
@@ -829,29 +842,21 @@ async def upload_tickets_from_drive(
     if not urls:
         return render(request, "manage.html", manage_ctx(db, user, event, errors=["Paste a Google Drive link."]), status=422)
     msgs, errors = [], []
-    token = re.sub(r"[^\w-]", "", token)[:40]
-    if len(DRIVE_PROGRESS) > 200:
-        DRIVE_PROGRESS.clear()
-
-    def report(index: int, stage: str = "download"):
-        def callback(done: int = 0, total: int = 0):
-            share = (done / total) if total else 0
-            DRIVE_PROGRESS[token] = {"pct": min(100, int((index + share) * 100 / len(urls))), "stage": stage}
-        return callback
-
+    report = Reporter(job)
     for index, url in enumerate(urls):
+        share = report.part(index / len(urls), (index + 1) / len(urls))
         try:
-            content = await fetch_drive_pdf(url, progress=report(index) if token else None)
-            if token:
-                report(index + 1, "process")()
-            result = add_ticket_pdf(db, event.id, content, replace=replace == "on" and index == 0)
+            content = await fetch_drive_pdf(
+                url, progress=lambda done, total, s=share: s(0.3 * (done / total if total else 0), "Downloading from Google Drive"))
+            result = await asyncio.to_thread(add_ticket_pdf, db, event.id, content, replace == "on" and index == 0,
+                                             share.part(0.3, 1.0))
         except (DriveError, PdfProcessingError) as exc:
             errors.append(f"{url[:70]}: {exc}")
             continue
         msgs.append(f"Drive file {index + 1}: added {result['pages']} page(s); assigned {result['assigned']} ticket(s) to guests."
                     + (f" {result['spare']} spare." if result["spare"] else ""))
         msgs.extend(upload_notes(result))
-    DRIVE_PROGRESS.pop(token, None)
+    report.done()
     return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, errors=errors),
                   status=422 if errors and not msgs else 200)
 
@@ -935,11 +940,15 @@ async def api_upload_tickets(
             "pages_without_readable_code": result["unreadable"]}
 
 
-@app.get("/events/{event_id}/tickets/audit", response_class=HTMLResponse)
-def audit_ticket_files(event_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+@app.api_route("/events/{event_id}/tickets/audit", methods=["GET", "POST"], response_class=HTMLResponse)
+async def audit_ticket_files(event_id: int, request: Request, job: str = Form(""), user: User = Depends(require_admin),
+                             db: Session = Depends(get_db)):
     """Re-read every stored ticket page: unchanged files, QR codes, and pages that share a code or a file."""
     event = get_event_or_404(db, event_id)
-    return render(request, "manage.html", manage_ctx(db, user, event, audit=audit_tickets(db, event.id)))
+    report = Reporter(job)
+    result = await asyncio.to_thread(audit_tickets, db, event.id, report)
+    report.done()
+    return render(request, "manage.html", manage_ctx(db, user, event, audit=result))
 
 
 @app.post("/events/{event_id}/delete", response_class=HTMLResponse)
@@ -1152,13 +1161,15 @@ def mark_delivered(db: Session, tickets: list[Ticket]) -> None:
     db.commit()
 
 
-async def send_tickets(db: Session, attendee: Attendee, event: Event, tickets: list[Ticket]) -> list[Ticket]:
+async def send_tickets(db: Session, attendee: Attendee, event: Event, tickets: list[Ticket], progress=None) -> list[Ticket]:
     """Send these tickets over WhatsApp one by one (varied wording, best available line with fail-over);
     returns the ones that went out. Raises WhatsAppError only if nothing was sent."""
     sent: list[Ticket] = []
     total = len(attendee.tickets)
     try:
-        for ticket in tickets:
+        for number, ticket in enumerate(tickets, start=1):
+            if progress:
+                progress((number - 1) / len(tickets), f"Sending ticket {number} of {len(tickets)} to {attendee.name}")
             ref, line = await linesmod.deliver_pdf(
                 db, attendee.phone, ticket.file_path,
                 caption=ticket_caption(attendee.name, event.name, event.event_date,
@@ -1173,6 +1184,8 @@ async def send_tickets(db: Session, attendee: Attendee, event: Event, tickets: l
             ticket.send_failed = False
             db.commit()
             sent.append(ticket)
+            if progress:
+                progress(number / len(tickets), f"Sent ticket {number} of {len(tickets)}")
     except WhatsAppError:
         if not sent:
             raise
@@ -1227,7 +1240,7 @@ async def toggle_check_in(attendee_id: int, request: Request, user: User = Depen
 
 
 @app.post("/attendees/{attendee_id}/whatsapp", response_class=HTMLResponse)
-async def whatsapp_dispatch(attendee_id: int, request: Request,
+async def whatsapp_dispatch(attendee_id: int, request: Request, job: str = Form(""),
                             user: User = Depends(require_staff), db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
     event = db.get(Event, attendee.event_id)
@@ -1242,7 +1255,7 @@ async def whatsapp_dispatch(attendee_id: int, request: Request,
     if not attendee.tickets:
         return card_response(request, attendee, toast("No ticket PDF is attached to this guest.", "error"))
     try:
-        sent = await send_tickets(db, attendee, event, targets)
+        sent = await send_tickets(db, attendee, event, targets, Reporter(job))
     except WhatsAppError as exc:
         log.warning("WhatsApp dispatch failed for attendee %s: %s", attendee.id, exc)
         return card_response(request, attendee, toast(f"WhatsApp failed: {exc}", "error"))
@@ -1301,7 +1314,7 @@ def resend_form(attendee_id: int, request: Request, user: User = Depends(require
 
 
 @app.post("/attendees/{attendee_id}/resend", response_class=HTMLResponse)
-async def resend_tickets(attendee_id: int, request: Request, via: str = Form("whatsapp"),
+async def resend_tickets(attendee_id: int, request: Request, via: str = Form("whatsapp"), job: str = Form(""),
                          user: User = Depends(require_staff), db: Session = Depends(get_db)):
     """Send the already-delivered tickets again, without changing who is admitted."""
     attendee = get_attendee_or_404(db, attendee_id)
@@ -1318,7 +1331,7 @@ async def resend_tickets(attendee_id: int, request: Request, via: str = Form("wh
         return render(request, "partials/qr_modal.html", {"attendee": attendee, "bundle": bundle, "unreachable": unreachable,
                                                           "note": "Tickets that were already handed out"})
     try:
-        sent = await send_tickets(db, attendee, event, targets)
+        sent = await send_tickets(db, attendee, event, targets, Reporter(job))
     except WhatsAppError as exc:
         return again(f"WhatsApp failed: {exc}")
     return oob_card(request, attendee, toast(f"Sent {len(sent)} ticket{'s' if len(sent) != 1 else ''} to {attendee.name} again"))
@@ -1345,7 +1358,7 @@ def shirt_form(attendee_id: int, request: Request, user: User = Depends(require_
 
 @app.post("/attendees/{attendee_id}/shirt-missing", response_class=HTMLResponse)
 async def shirt_missing(attendee_id: int, request: Request, count: str = Form("1"), via: str = Form("whatsapp"),
-                        user: User = Depends(require_staff), db: Session = Depends(get_db)):
+                        job: str = Form(""), user: User = Depends(require_staff), db: Session = Depends(get_db)):
     attendee = get_attendee_or_404(db, attendee_id)
     try:
         n = int(count or 0)
@@ -1368,6 +1381,7 @@ async def shirt_missing(attendee_id: int, request: Request, count: str = Form("1
                       {"attendee": attendee, "url": config.SHIRT_PAYMENT_URL, "count": n,
                        "svg": qr.svg_data_uri(scale=8, border=2, dark="#0f172a", light="#ffffff")},
                       headers={"HX-Trigger": "refreshStats"})
+    Reporter(job)(0.2, "Sending the payment link")
     try:
         await linesmod.deliver_text(db, attendee.phone, shirt_message(attendee, n), send_whatsapp_text)
     except WhatsAppError as exc:
@@ -1408,7 +1422,7 @@ def partial_form(attendee_id: int, request: Request, user: User = Depends(requir
 @app.post("/attendees/{attendee_id}/partial", response_class=HTMLResponse)
 async def partial_send(
     attendee_id: int, request: Request,
-    adult: str = Form("0"), youth: str = Form("0"), via: str = Form("whatsapp"),
+    adult: str = Form("0"), youth: str = Form("0"), via: str = Form("whatsapp"), job: str = Form(""),
     user: User = Depends(require_staff), db: Session = Depends(get_db),
 ):
     attendee = get_attendee_or_404(db, attendee_id)
@@ -1448,7 +1462,7 @@ async def partial_send(
                       headers={"HX-Trigger": "refreshStats"})
 
     try:
-        sent = await send_tickets(db, attendee, event, targets)
+        sent = await send_tickets(db, attendee, event, targets, Reporter(job))
     except WhatsAppError as exc:
         log.warning("Partial WhatsApp send failed for attendee %s: %s", attendee.id, exc)
         return render(request, "partials/partial_form.html",
@@ -1677,11 +1691,13 @@ async def add_line(request: Request, label: str = Form(""), daily_cap: str = For
 
 
 @app.post("/lines/bulk", response_class=HTMLResponse)
-async def add_lines_bulk(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+async def add_lines_bulk(request: Request, job: str = Form(""), user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """Top up to TARGET_LINES (10) lines so there are always spares ready; each still needs its QR scan."""
     made, errors = 0, []
+    report = Reporter(job)
     async with LINE_LOCK:
         while db.query(WhatsAppLine).count() < TARGET_LINES:
+            report(db.query(WhatsAppLine).count() / TARGET_LINES, f"Creating line {db.query(WhatsAppLine).count() + 1} of {TARGET_LINES}")
             try:
                 await create_line(db, f"Line {db.query(WhatsAppLine).count() + 1}", config.LINE_DAILY_CAP)
                 made += 1
@@ -1703,8 +1719,8 @@ def lines_settings(request: Request, test_number: str = Form(""), user: User = D
 
 
 @app.post("/lines/test-all", response_class=HTMLResponse)
-async def test_all_lines(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
-    result = await linesmod.run_line_tests(db)
+async def test_all_lines(request: Request, job: str = Form(""), user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    result = await linesmod.run_line_tests(db, progress=Reporter(job))
     return render(request, "lines.html", lines_ctx(db, user, messages=[
         f"Tested all lines: {result['ok']} working, {result['bad']} not working."]))
 
@@ -1797,10 +1813,13 @@ async def reset_line_session(line_id: int, request: Request, user: User = Depend
 
 
 @app.post("/lines/profile-all", response_class=HTMLResponse)
-async def profile_all_lines(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+async def profile_all_lines(request: Request, job: str = Form(""), user: User = Depends(require_admin), db: Session = Depends(get_db)):
     """(Re)apply the profile name and picture to every connected line, with pauses in between."""
     done = failed = 0
-    for i, line in enumerate(db.query(WhatsAppLine).filter(WhatsAppLine.status != "disabled").order_by(WhatsAppLine.id)):
+    report = Reporter(job)
+    todo = list(db.query(WhatsAppLine).filter(WhatsAppLine.status != "disabled").order_by(WhatsAppLine.id))
+    for i, line in enumerate(todo):
+        report(i / max(1, len(todo)), f"Updating the profile of {line.label} ({i + 1} of {len(todo)})")
         try:
             state = await evolution_state(line.instance_name)
         except WhatsAppError:

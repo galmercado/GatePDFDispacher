@@ -158,6 +158,14 @@ A re-encoded image is used only if it is really smaller. Tests decode the QR cod
 **Retention.** Ticket PDFs are deleted `TICKET_RETENTION_DAYS` (default 30) after the event ends, checked every 10 minutes
 (Settings → Cleanup; 0 keeps them). Guests and attendance stay; the tickets lose their file, so old download links stop working.
 
+### Progress popup for long actions
+
+Every action that can take more than a moment (guest list and registration imports, ticket PDF upload with QR checking and compression,
+Google Drive fetch, ticket check, sending tickets on WhatsApp, testing/creating lines) shows a popup with a **percentage ring** and what it is
+doing now ("Reading the QR codes - page 8 of 31"). It appears only if the action takes longer than about a third of a second. The browser follows the
+upload itself and then polls `GET /jobs/<token>`; the server reports under that token (`app/progress.py`). To add it to another form or htmx
+button, put `data-progress="Title"` on it and accept `job: str = Form("")` in the handler.
+
 ### Delivery reports (why "sent" is not always delivered)
 
 Evolution answers HTTP 201 as soon as it hands a message to WhatsApp; WhatsApp may refuse it a moment later (status `ERROR`, code `463`)

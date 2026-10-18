@@ -2605,8 +2605,8 @@ def test_drive_form_adds_tickets(client, admin, event_id, monkeypatch):
                    data={"links": "https://drive.google.com/file/d/goodgoodgood1/view\nhttps://drive.google.com/file/d/badbadbadbad/view"})
     assert r.status_code == 200 and "added 2 page(s)" in r.text and "not shared" in r.text
     assert admin.post(f"/events/{event_id}/tickets/drive", data={"links": " "}).status_code == 422
-    assert admin.get(f"/events/{event_id}/tickets/drive-progress?token=zzz").json() == {"pct": 0, "stage": "download"}
-    assert "data-progress-url" in admin.get(f"/events/{event_id}/manage").text
+    assert admin.get("/jobs/zzz").json() == {"pct": 0, "label": ""}
+    assert 'data-progress="Fetching tickets from Google Drive"' in admin.get(f"/events/{event_id}/manage").text
 
 
 @pytest.fixture()
@@ -3005,3 +3005,47 @@ def test_audit_finds_shared_codes_and_changed_files(admin, event_id):
     bad = admin.get(f"/events/{event_id}/tickets/audit").text
     assert "Problems found" in bad and "Same QR code" in bad and "Identical files" in bad and "Changed since stored" in bad
     assert admin.get(f"/events/{event_id}/tickets/audit", follow_redirects=True).status_code == 200
+
+
+def test_progress_reporter_follows_a_long_action_and_the_popup_is_in_every_page(admin, doorman, client, event_id):
+    from app import progress
+    rep = progress.Reporter("tok-1")
+    rep(0.1, "Reading")
+    rep.part(0.5, 1.0)(0.5, "Half of the second part")
+    assert admin.get("/jobs/tok-1").json() == {"pct": 75, "label": "Half of the second part"}
+    rep(0.2)                                                        # never goes backwards
+    assert admin.get("/jobs/tok-1").json()["pct"] == 75
+    rep.done()
+    assert admin.get("/jobs/tok-1").json() == {"pct": 0, "label": ""}
+    assert TestClient(app, follow_redirects=False).get("/jobs/x").status_code == 303                 # signed-in users only
+    page = admin.get(f"/events/{event_id}/manage").text
+    assert 'id="progress-modal"' in page and "window.Progress" in page and 'data-progress="Adding the ticket pages"' in page
+    assert 'data-progress="Importing the guest list"' in page and 'data-progress="Checking the ticket pages"' in page
+    assert 'data-progress="Testing the WhatsApp lines"' in admin.get("/lines").text
+
+
+def test_long_actions_report_their_progress_under_the_job_token(admin, event_id):
+    seen = []
+    from app import progress
+    real = progress.Reporter.__call__
+
+    def spy(self, fraction, label=None):
+        seen.append((self.token or "-", round(fraction, 2)))
+        return real(self, fraction, label)
+
+    import pytest as _p
+    mp = _p.MonkeyPatch()
+    mp.setattr(progress.Reporter, "__call__", spy)
+    try:
+        r = admin.post(f"/events/{event_id}/tickets/upload", data={"job": "job-up"}, files={"file": ("a.pdf", make_pdf(3))})
+        assert r.status_code == 200
+        r = admin.post(f"/events/{event_id}/attendees/import", data={"job": "job-imp"},
+                       files={"file": ("g.json", json.dumps([{"name": "Prog One", "phone": "0501119999"}]).encode())})
+        assert r.status_code == 200
+        r = admin.post(f"/events/{event_id}/tickets/audit", data={"job": "job-aud"})
+        assert r.status_code == 200 and "page(s) checked" in r.text
+    finally:
+        mp.undo()
+    tokens = {t for t, _ in seen}
+    assert {"job-up", "job-imp", "job-aud"} <= tokens
+    assert max(f for t, f in seen if t == "job-up") > 0.5

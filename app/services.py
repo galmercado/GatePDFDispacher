@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from . import config, data
 from .pdfs import compress_writer, read_codes, sha256_hex
+from .progress import call as report_progress
 from .models import Attendee, Event, SpareTicket, Ticket
 
 log = logging.getLogger("gate.whatsapp")
@@ -400,7 +401,7 @@ def _fmt(value) -> str:
     return f"{value:g}" if isinstance(value, float) else str(value)
 
 
-def import_attendees(db: Session, event_id: int, items: list[AttendeeIn]) -> ImportOutcome:
+def import_attendees(db: Session, event_id: int, items: list[AttendeeIn], progress=None) -> ImportOutcome:
     """Add new guests and update existing ones with whatever the source provides.
 
     A guest is recognised by its reservation id (`external_ref`, from the registration system) if the row has one -
@@ -416,7 +417,9 @@ def import_attendees(db: Session, event_id: int, items: list[AttendeeIn]) -> Imp
     added = updated = unchanged = 0
     changes: list[str] = []
     warnings: list[str] = []
-    for item in items:
+    for number, item in enumerate(items, start=1):
+        if progress is not None and (number % 10 == 0 or number == len(items)):
+            progress(number / max(1, len(items)), f"Saving guests - {number} of {len(items)}")
         key = (item.name.lower(), item.phone)
         guest = by_ref.get(item.external_ref) if item.external_ref else by_name.get(key)
         diffs: list[str] = []
@@ -519,7 +522,7 @@ def _write_new_file(out_dir: Path, name: str, data: bytes) -> Path:
     raise PdfProcessingError("Could not find a free file name for a ticket page")
 
 
-def split_pdf_pages(content: bytes, event_id: int, start: int = 1, known: dict | None = None) -> SplitResult:
+def split_pdf_pages(content: bytes, event_id: int, start: int = 1, known: dict | None = None, progress=None) -> SplitResult:
     """Split a multi-page PDF into single-page files (ticket_NNNN.pdf, numbered from `start`) in
     storage/tickets/{event_id}/, compress them, and check every page's QR code.
 
@@ -533,7 +536,8 @@ def split_pdf_pages(content: bytes, event_id: int, start: int = 1, known: dict |
     out_dir.mkdir(parents=True, exist_ok=True)
 
     keys: list[str | None] = []              # pass 1: the code(s) of every page
-    for page in pages:
+    for number, page in enumerate(pages, start=1):
+        report_progress(progress, 0.45 * (number - 1) / len(pages), f"Reading the QR codes - page {number} of {len(pages)}")
         keys.append(read_codes(_page_bytes(page)))
     notes: list[str] = []
     if any(k is None for k in keys):         # no decoder installed: nothing can be checked
@@ -553,6 +557,7 @@ def split_pdf_pages(content: bytes, event_id: int, start: int = 1, known: dict |
     unreadable = 0
     index = start
     for position, (page, key) in enumerate(zip(pages, keys), start=1):
+        report_progress(progress, 0.45 + 0.55 * (position - 1) / len(pages), f"Compressing and saving - page {position} of {len(pages)}")
         if key and key not in constant and key in seen:
             duplicates.append((position, seen[key]))
             continue
@@ -606,7 +611,7 @@ def split_pdf(content: bytes, event_id: int, start: int = 1) -> list[Path]:
     return paths
 
 
-def audit_tickets(db: Session, event_id: int) -> dict:
+def audit_tickets(db: Session, event_id: int, progress=None) -> dict:
     """Check every stored ticket page of the event: file present and unchanged since it was stored, its QR code (read
     again from the file), and which pages carry the same code or are byte-identical. Rows stored before this check
     existed are filled in (code + hash) so later checks have something to compare with."""
@@ -617,7 +622,8 @@ def audit_tickets(db: Session, event_id: int) -> dict:
               "decoder": read_codes(b"") is not None}
     by_code: dict[str, list[str]] = {}
     by_hash: dict[str, list[str]] = {}
-    for row, holder in sorted(rows, key=lambda r: r[0].page_number):
+    for number, (row, holder) in enumerate(sorted(rows, key=lambda r: r[0].page_number), start=1):
+        report_progress(progress, (number - 1) / max(1, len(rows)), f"Checking page {number} of {len(rows)}")
         label = f"page {row.page_number} ({holder})"
         path = Path(row.file_path) if row.file_path else None
         if path is None or not path.is_file():
@@ -710,7 +716,7 @@ def release_tickets(db: Session, attendee: Attendee) -> None:
     db.expire(attendee, ["tickets"])  # already deleted; don't let a later cascade delete them twice
 
 
-def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = False) -> dict:
+def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = False, progress=None) -> dict:
     """Add the pages of a (merged) PDF to the event's ticket pool and hand them out.
 
     Additive by default: later uploads top up guests who are still missing tickets.
@@ -744,12 +750,15 @@ def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = F
     for model in (Ticket, SpareTicket):
         for qr, number in db.query(model.qr_code, model.page_number).filter(model.event_id == event_id, model.qr_code != ""):
             known.setdefault(qr, f"page {number}")
-    result = split_pdf_pages(content, event_id, start=last + 1, known=known)
+    report_progress(progress, 0.0, "Reading the PDF")
+    result = split_pdf_pages(content, event_id, start=last + 1, known=known,
+                             progress=(lambda f, label=None: report_progress(progress, 0.9 * f, label)) if progress else None)
     db.query(Event).filter(Event.id == event_id).update({Event.tickets_purged_at: None})
     for page in result.pages:
         db.add(SpareTicket(event_id=event_id, page_number=page.index, file_path=str(page.path),
                            qr_code=page.qr, file_hash=page.file_hash))
     db.commit()
+    report_progress(progress, 0.92, "Giving the pages to the guests")
     return {"pages": len(result.pages), "duplicates": result.duplicates, "unreadable": result.unreadable,
             "notes": result.notes, **rebalance_tickets(db, event_id)}
 
