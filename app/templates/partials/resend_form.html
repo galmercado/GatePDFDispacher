@@ -9,7 +9,7 @@
   <ul class="list-inside list-disc">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
 <p class="mb-3 text-sm text-slate-300">Send the {{ count }} ticket{{ 's' if count != 1 }} already handed out to this guest once more (for example if the message never arrived).
   Who is admitted does not change.</p>
-<form hx-post="/attendees/{{ attendee.id }}/resend" data-progress="Sending the tickets again" hx-target="#qr-content" hx-swap="innerHTML">
+<form hx-post="/attendees/{{ attendee.id }}/resend" hx-target="#qr-content" hx-swap="innerHTML">
   <div class="grid grid-cols-2 gap-2">
     <button name="via" value="whatsapp" class="flex h-14 items-center justify-center gap-2 rounded-xl bg-green-500 font-bold text-green-950 hover:bg-green-400">
       <i class="ph-fill ph-whatsapp-logo text-2xl"></i> WhatsApp</button>

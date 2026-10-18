@@ -11,7 +11,7 @@
 </div>
 {% if errors %}<div class="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert">
   <ul class="list-inside list-disc">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
-<form hx-post="/attendees/{{ attendee.id }}/partial" data-progress="Sending the tickets" hx-target="#qr-content" hx-swap="innerHTML">
+<form hx-post="/attendees/{{ attendee.id }}/partial" hx-target="#qr-content" hx-swap="innerHTML">
   <p class="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">How many tickets to send now?</p>
   <div class="mb-4 grid grid-cols-2 gap-3">
     {% for key, label, left, val in [('adult', 'מבוגר (adult)', attendee.remaining_adult, adult), ('youth', 'נוער (youth)', attendee.remaining_youth, youth)] %}

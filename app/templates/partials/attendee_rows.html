@@ -46,7 +46,7 @@
   {# WhatsApp and QR both admit; the small button on the side toggles admission only. After a partial send they hand out the rest. #}
   <div class="mt-3 grid grid-cols-[1fr_1fr_auto] gap-2">
     <button hx-post="/attendees/{{ a.id }}/whatsapp" hx-target="#attendee-{{ a.id }}" hx-swap="outerHTML"
-            hx-disabled-elt="this" data-progress="Sending the tickets on WhatsApp" aria-label="Admit and send ticket via WhatsApp"
+            hx-disabled-elt="this" aria-label="Admit and send ticket via WhatsApp"
             class="flex h-16 flex-col items-center justify-center gap-0.5 rounded-2xl bg-green-500 text-green-950 hover:bg-green-400 disabled:opacity-50">
       <i class="ph-fill ph-whatsapp-logo text-3xl"></i><span class="text-xs font-bold uppercase tracking-wide">WhatsApp{% if held %} · {{ a.releasable }}{% elif rest %} · rest ({{ rest }}){% endif %}</span>
     </button>

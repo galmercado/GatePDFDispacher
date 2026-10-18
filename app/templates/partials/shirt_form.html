@@ -10,7 +10,7 @@
 <div class="mb-3 rounded-xl bg-slate-950 p-3 text-sm text-slate-300" dir="rtl">
   נשארו להכניס: <b class="text-amber-300">{{ attendee.remaining_total }}</b> כרטיסים
 </div>
-<form hx-post="/attendees/{{ attendee.id }}/shirt-missing" data-progress="Sending the payment link" hx-target="#qr-content" hx-swap="innerHTML">
+<form hx-post="/attendees/{{ attendee.id }}/shirt-missing" hx-target="#qr-content" hx-swap="innerHTML">
   <p class="mb-2 text-xs font-medium uppercase tracking-wide text-slate-400">How many tickets are missing a shirt?</p>
   <div class="mb-3 flex items-stretch overflow-hidden rounded-xl border border-slate-700">
     <button type="button" class="w-11 bg-slate-800 text-xl text-white hover:bg-slate-700" onclick="const i=this.nextElementSibling; i.value=Math.max(1,+i.value-1)">−</button>

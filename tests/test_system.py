@@ -3049,3 +3049,12 @@ def test_long_actions_report_their_progress_under_the_job_token(admin, event_id)
     tokens = {t for t, _ in seen}
     assert {"job-up", "job-imp", "job-aud"} <= tokens
     assert max(f for t, f in seen if t == "job-up") > 0.5
+
+
+def test_whatsapp_sends_have_no_popup_and_the_popup_waits_five_seconds(admin, doorman, event_id, wa):
+    att = party(admin, event_id)
+    card = doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+    assert "data-progress" not in card
+    for url in (f"/attendees/{att}/partial-form", f"/attendees/{att}/resend-form", f"/attendees/{att}/shirt-form"):
+        assert "data-progress" not in doorman.get(url).text
+    assert "opts.delay === undefined ? 5000" in admin.get(f"/events/{event_id}/manage").text

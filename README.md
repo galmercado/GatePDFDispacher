@@ -160,9 +160,9 @@ A re-encoded image is used only if it is really smaller. Tests decode the QR cod
 
 ### Progress popup for long actions
 
-Every action that can take more than a moment (guest list and registration imports, ticket PDF upload with QR checking and compression,
-Google Drive fetch, ticket check, sending tickets on WhatsApp, testing/creating lines) shows a popup with a **percentage ring** and what it is
-doing now ("Reading the QR codes - page 8 of 31"). It appears only if the action takes longer than about a third of a second. The browser follows the
+Every long action (guest list and registration imports, ticket PDF upload with QR checking and compression,
+Google Drive fetch, ticket check, testing/creating lines) shows a popup with a **percentage ring** and what it is
+doing now ("Reading the QR codes - page 8 of 31"). It appears only if the action takes longer than **5 seconds** (`opts.delay` in `base.html`). WhatsApp sends at the door have no popup: the doorman carries on while the card updates when the send is done. The browser follows the
 upload itself and then polls `GET /jobs/<token>`; the server reports under that token (`app/progress.py`). To add it to another form or htmx
 button, put `data-progress="Title"` on it and accept `job: str = Form("")` in the handler.
 

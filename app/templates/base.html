@@ -100,7 +100,7 @@
 
   <script>
     // Percentage popup for long actions. A form or htmx element with data-progress="Title" shows it; the server reports its
-    // progress under a random job token (GET /jobs/<token>). It only appears if the action takes longer than a moment.
+    // progress under a random job token (GET /jobs/<token>). It only appears if the action takes longer than 5 seconds.
     window.Progress = (function () {
       const dlg = document.getElementById('progress-modal'), ring = document.getElementById('pg-ring'),
             pct = document.getElementById('pg-pct'), label = document.getElementById('pg-label'),
@@ -130,7 +130,7 @@
           shown = 0; base = opts.base || 0; token = opts.token; onCancel = opts.onCancel || null;
           paint(0); title.textContent = opts.title || 'Working…'; label.textContent = opts.label || '';
           cancel.classList.toggle('hidden', !onCancel);
-          showTimer = setTimeout(() => { if (!dlg.open) dlg.showModal(); }, opts.delay === undefined ? 350 : opts.delay);
+          showTimer = setTimeout(() => { if (!dlg.open) dlg.showModal(); }, opts.delay === undefined ? 5000 : opts.delay);
           if (token) pollTimer = setInterval(poll, 450);
         },
         upload(p, text) { paint(p * base / 100); if (text) label.textContent = text; },
