@@ -1,5 +1,6 @@
 """Ticket PDF helpers: size reduction, Google Drive download, and reading the game out of a ticket file
 (its header line and its first page)."""
+import hashlib
 import io
 import logging
 import re
@@ -77,6 +78,34 @@ def compress_writer(writer: PdfWriter) -> None:
                 log.debug("Image left unchanged: %s", exc)
         page.compress_content_streams()
     writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
+
+
+# --------------------------------------------------------------------------- QR codes and hashes
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def read_codes(pdf_bytes: bytes) -> str | None:
+    """What the QR codes / barcodes on the (first) page of this PDF say, as one stable key ('' = nothing readable).
+    None when no decoder is installed. The page is rendered the way a phone camera would see it, so codes drawn as
+    vectors and codes stored as images are both found."""
+    try:
+        import pypdfium2
+        import zxingcpp
+    except ImportError:
+        return None
+    try:
+        doc = pypdfium2.PdfDocument(pdf_bytes)
+        try:
+            image = doc[0].render(scale=config.QR_RENDER_SCALE).to_pil()
+        finally:
+            doc.close()
+        found = sorted({r.text for r in zxingcpp.read_barcodes(image) if r.text})
+    except Exception as exc:
+        log.warning("Could not read the codes of a page: %s", exc)
+        return ""
+    return "|".join(found)[:600]
 
 
 # --------------------------------------------------------------------------- Google Drive

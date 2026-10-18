@@ -20,7 +20,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
 from . import config, data
-from .pdfs import compress_writer
+from .pdfs import compress_writer, read_codes, sha256_hex
 from .models import Attendee, Event, SpareTicket, Ticket
 
 log = logging.getLogger("gate.whatsapp")
@@ -470,38 +470,182 @@ def event_ticket_dir(event_id: int) -> Path:
     return config.STORAGE_DIR / "tickets" / str(event_id)
 
 
-def split_pdf(content: bytes, event_id: int, start: int = 1) -> list[Path]:
-    """Split a multi-page PDF into single-page files (ticket_NNNN.pdf, numbered from `start`)
-    in storage/tickets/{event_id}/. Existing files are never touched."""
+class SplitPage(NamedTuple):
+    index: int                 # page number in the event's pool
+    path: Path
+    qr: str                    # what the page's code(s) say ('' = none readable)
+    file_hash: str             # SHA-256 of the stored file
+
+
+class SplitResult(NamedTuple):
+    pages: list                # list[SplitPage] actually stored
+    duplicates: list           # [(source page in the uploaded PDF (1-based), what it duplicates)]
+    unreadable: int            # stored pages without a readable QR code / barcode
+    notes: list                # warnings for the person uploading
+
+
+def _open_pdf(content: bytes) -> PdfReader:
     try:
         reader = PdfReader(io.BytesIO(content))
         if reader.is_encrypted:
             raise PdfProcessingError("Encrypted PDFs are not supported")
-        page_count = len(reader.pages)
+        if len(reader.pages) == 0:
+            raise PdfProcessingError("The PDF has no pages")
+        return reader
     except PdfProcessingError:
         raise
     except (PyPdfError, ValueError, OSError, KeyError) as exc:
         raise PdfProcessingError(f"Not a valid PDF: {exc}")
-    if page_count == 0:
-        raise PdfProcessingError("The PDF has no pages")
 
+
+def _page_bytes(page) -> bytes:
+    writer = PdfWriter()
+    writer.add_page(page)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def _write_new_file(out_dir: Path, name: str, data: bytes) -> Path:
+    """Write a file that does not exist yet - an existing ticket file is never overwritten."""
+    path = out_dir / name
+    for attempt in range(100):
+        try:
+            with open(path, "xb") as fh:
+                fh.write(data)
+            return path
+        except FileExistsError:
+            path = out_dir / f"{Path(name).stem}_{attempt + 1}{Path(name).suffix}"
+    raise PdfProcessingError("Could not find a free file name for a ticket page")
+
+
+def split_pdf_pages(content: bytes, event_id: int, start: int = 1, known: dict | None = None) -> SplitResult:
+    """Split a multi-page PDF into single-page files (ticket_NNNN.pdf, numbered from `start`) in
+    storage/tickets/{event_id}/, compress them, and check every page's QR code.
+
+    `known` maps the codes already in the event to a description. A page whose code is already known - or that
+    repeats an earlier page of this same PDF - is NOT stored (two tickets with one code would let two people in).
+    If nearly every page of a big PDF carries the same code it is a constant (not a ticket number) and is not used.
+    A compressed page that no longer reads the same code is stored uncompressed instead."""
+    reader = _open_pdf(content)
+    pages = list(reader.pages)
     out_dir = event_ticket_dir(event_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    paths: list[Path] = []
+    keys: list[str | None] = []              # pass 1: the code(s) of every page
+    for page in pages:
+        keys.append(read_codes(_page_bytes(page)))
+    notes: list[str] = []
+    if any(k is None for k in keys):         # no decoder installed: nothing can be checked
+        notes.append("QR codes could not be checked (decoder not installed).")
+        keys = [""] * len(pages)
+    counts: dict[str, int] = {}
+    for k in keys:
+        if k:
+            counts[k] = counts.get(k, 0) + 1
+    constant = {k for k, n in counts.items() if len(pages) >= 5 and n >= 0.9 * len(pages)}
+    if constant:
+        notes.append("Nearly every page carries the same code, so codes were not used to look for duplicates.")
+
+    stored: list[SplitPage] = []
+    duplicates: list[tuple[int, str]] = []
+    seen: dict[str, str] = dict(known or {})
+    unreadable = 0
+    index = start
+    for position, (page, key) in enumerate(zip(pages, keys), start=1):
+        if key and key not in constant and key in seen:
+            duplicates.append((position, seen[key]))
+            continue
+        original = _page_bytes(page)
+        data = original
+        if config.PDF_COMPRESS:
+            try:
+                writer = PdfWriter()
+                writer.add_page(page)
+                compress_writer(writer)
+                buf = io.BytesIO()
+                writer.write(buf)
+                packed = buf.getvalue()
+                if len(packed) < len(original) and (not key or read_codes(packed) == key):
+                    data = packed
+                elif key:
+                    log.warning("Compressing page %s would change its QR code - stored as is", position)
+            except Exception:           # never lose a ticket over an optimisation
+                log.exception("Could not compress ticket page %s", position)
+        path = _write_new_file(out_dir, f"ticket_{index:04d}.pdf", data)
+        stored.append(SplitPage(index, path, "" if key in constant else key, sha256_hex(data)))
+        if key and key not in constant:
+            seen[key] = f"page {index}"
+        if not key:
+            unreadable += 1
+        index += 1
+    if duplicates:
+        notes.append(f"Skipped {len(duplicates)} page(s) whose QR code is already in this event.")
+    if unreadable and not constant and not any(k is None for k in keys) and "decoder not installed" not in " ".join(notes):
+        notes.append(f"{unreadable} page(s) have no readable QR code and could not be checked for duplicates.")
+    return SplitResult(stored, duplicates, unreadable, notes)
+
+
+def split_pdf(content: bytes, event_id: int, start: int = 1) -> list[Path]:
+    """Split a PDF into single-page files without looking for duplicates (see split_pdf_pages)."""
+    reader = _open_pdf(content)
+    out_dir = event_ticket_dir(event_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
     for index, page in enumerate(reader.pages, start=start):
         writer = PdfWriter()
         writer.add_page(page)
         if config.PDF_COMPRESS:
             try:
                 compress_writer(writer)
-            except Exception:           # never lose a ticket over an optimisation
+            except Exception:
                 log.exception("Could not compress ticket page %s", index)
-        path = out_dir / f"ticket_{index:04d}.pdf"
-        with open(path, "wb") as fh:
-            writer.write(fh)
-        paths.append(path)
+        buf = io.BytesIO()
+        writer.write(buf)
+        paths.append(_write_new_file(out_dir, f"ticket_{index:04d}.pdf", buf.getvalue()))
     return paths
+
+
+def audit_tickets(db: Session, event_id: int) -> dict:
+    """Check every stored ticket page of the event: file present and unchanged since it was stored, its QR code (read
+    again from the file), and which pages carry the same code or are byte-identical. Rows stored before this check
+    existed are filled in (code + hash) so later checks have something to compare with."""
+    guests = {a.id: a.name for a in db.query(Attendee.id, Attendee.name).filter(Attendee.event_id == event_id)}
+    rows = [(t, guests.get(t.attendee_id, "?")) for t in db.query(Ticket).filter(Ticket.event_id == event_id)]
+    rows += [(t, "unassigned") for t in db.query(SpareTicket).filter(SpareTicket.event_id == event_id)]
+    report = {"checked": 0, "missing": [], "changed": [], "no_code": 0, "same_code": [], "same_file": [], "backfilled": 0,
+              "decoder": read_codes(b"") is not None}
+    by_code: dict[str, list[str]] = {}
+    by_hash: dict[str, list[str]] = {}
+    for row, holder in sorted(rows, key=lambda r: r[0].page_number):
+        label = f"page {row.page_number} ({holder})"
+        path = Path(row.file_path) if row.file_path else None
+        if path is None or not path.is_file():
+            report["missing"].append(label)
+            continue
+        report["checked"] += 1
+        data = path.read_bytes()
+        digest = sha256_hex(data)
+        if row.file_hash and row.file_hash != digest:
+            report["changed"].append(label)
+        code = read_codes(data) if report["decoder"] else ""
+        if code is None:
+            code = ""
+        if not row.file_hash:
+            row.file_hash, row.qr_code = digest, code
+            report["backfilled"] += 1
+        elif row.qr_code and code and row.qr_code != code:
+            report["changed"].append(label + " - its QR code is not what was stored")
+        if code:
+            by_code.setdefault(code, []).append(label)
+        else:
+            report["no_code"] += 1
+        by_hash.setdefault(digest, []).append(label)
+    db.commit()
+    report["same_code"] = [{"code": c[:80], "pages": p} for c, p in by_code.items() if len(p) > 1]
+    report["same_file"] = [{"pages": p} for p in by_hash.values() if len(p) > 1]
+    report["ok"] = not (report["missing"] or report["changed"] or report["same_code"] or report["same_file"])
+    return report
 
 
 def ticket_status(db: Session, event_id: int) -> dict:
@@ -529,7 +673,8 @@ def rebalance_tickets(db: Session, event_id: int) -> dict:
         surplus = len(a.tickets) - a.ticket_count
         if surplus > 0:
             for t in sorted(a.tickets, key=lambda t: t.page_number, reverse=True)[:surplus]:
-                db.add(SpareTicket(event_id=event_id, page_number=t.page_number, file_path=t.file_path))
+                db.add(SpareTicket(event_id=event_id, page_number=t.page_number, file_path=t.file_path,
+                                   qr_code=t.qr_code, file_hash=t.file_hash))
                 db.delete(t)
     db.flush()
     db.expire_all()
@@ -546,7 +691,7 @@ def rebalance_tickets(db: Session, event_id: int) -> dict:
                 missing += 1
                 continue
             db.add(Ticket(event_id=event_id, attendee_id=a.id, page_number=spare.page_number,
-                          file_path=spare.file_path))
+                          file_path=spare.file_path, qr_code=spare.qr_code, file_hash=spare.file_hash))
             db.delete(spare)
             assigned += 1
     db.commit()
@@ -558,7 +703,8 @@ def rebalance_tickets(db: Session, event_id: int) -> dict:
 def release_tickets(db: Session, attendee: Attendee) -> None:
     """Return an attendee's tickets to the spare pool (call before deleting them)."""
     for t in list(attendee.tickets):
-        db.add(SpareTicket(event_id=attendee.event_id, page_number=t.page_number, file_path=t.file_path))
+        db.add(SpareTicket(event_id=attendee.event_id, page_number=t.page_number, file_path=t.file_path,
+                           qr_code=t.qr_code, file_hash=t.file_hash))
         db.delete(t)
     db.flush()
     db.expire(attendee, ["tickets"])  # already deleted; don't let a later cascade delete them twice
@@ -594,12 +740,18 @@ def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = F
         db.query(func.coalesce(func.max(SpareTicket.page_number), 0)).filter(
             SpareTicket.event_id == event_id).scalar(),
     )
-    paths = split_pdf(content, event_id, start=last + 1)
+    known: dict[str, str] = {}
+    for model in (Ticket, SpareTicket):
+        for qr, number in db.query(model.qr_code, model.page_number).filter(model.event_id == event_id, model.qr_code != ""):
+            known.setdefault(qr, f"page {number}")
+    result = split_pdf_pages(content, event_id, start=last + 1, known=known)
     db.query(Event).filter(Event.id == event_id).update({Event.tickets_purged_at: None})
-    for offset, path in enumerate(paths, start=1):
-        db.add(SpareTicket(event_id=event_id, page_number=last + offset, file_path=str(path)))
+    for page in result.pages:
+        db.add(SpareTicket(event_id=event_id, page_number=page.index, file_path=str(page.path),
+                           qr_code=page.qr, file_hash=page.file_hash))
     db.commit()
-    return {"pages": len(paths), **rebalance_tickets(db, event_id)}
+    return {"pages": len(result.pages), "duplicates": result.duplicates, "unreadable": result.unreadable,
+            "notes": result.notes, **rebalance_tickets(db, event_id)}
 
 
 # --------------------------------------------------------------------------- WhatsApp

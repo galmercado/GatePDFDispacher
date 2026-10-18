@@ -2907,3 +2907,101 @@ def test_delivery_webhook_flags_undelivered_tickets_and_fails_a_line_after_repea
     assert "did not deliver 1 ticket" in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text      # the other one is still flagged
     report(ids[1], "READ")
     assert "did not deliver" not in doorman.get(f"/events/{event_id}/search", params={"q": "Party"}).text
+
+
+# --------------------------------------------------------------------------- duplicate QR codes
+
+def coded_pdf(payloads: list[str]) -> bytes:
+    """One page per payload: a photo-like band plus a real QR code of that payload, on a white page (renders like a ticket)."""
+    import numpy as np
+    import segno
+    from PIL import Image, ImageOps
+    pages = []
+    for n, text in enumerate(payloads):
+        yy, xx = np.mgrid[0:500, 0:800]
+        band = np.stack([xx * 255 // 800, yy * 255 // 500, (xx + yy) * 255 // 1300], axis=-1)
+        band = np.clip(band + np.random.default_rng(n).normal(0, 4, band.shape), 0, 255).astype("uint8")
+        page = Image.new("RGB", (800, 1100), "white")
+        page.paste(Image.fromarray(band), (0, 0))
+        buf = io.BytesIO()
+        segno.make(text, error="m", micro=False).save(buf, kind="png", scale=8, border=4)
+        qr = ImageOps.expand(Image.open(buf).convert("RGB"), 20, fill="white")
+        page.paste(qr, (200, 560))
+        pages.append(page)
+    out = io.BytesIO()
+    pages[0].save(out, "PDF", save_all=True, append_images=pages[1:], resolution=100, quality=100)
+    return out.getvalue()
+
+
+def stored_pages(event_id):
+    from app.models import SpareTicket
+    with SessionLocal() as db:
+        rows = [(t.page_number, t.qr_code, t.file_path, t.file_hash) for t in db.query(Ticket).filter(Ticket.event_id == event_id)]
+        rows += [(t.page_number, t.qr_code, t.file_path, t.file_hash) for t in db.query(SpareTicket).filter(SpareTicket.event_id == event_id)]
+    return sorted(rows)
+
+
+def test_pages_with_the_same_qr_code_are_stored_once(event_id):
+    pytest.importorskip("zxingcpp")
+    pytest.importorskip("pypdfium2")
+    with SessionLocal() as db:
+        r = services.add_ticket_pdf(db, event_id, coded_pdf(["TKT-A", "TKT-B", "TKT-A"]))
+    assert r["pages"] == 2 and r["duplicates"] == [(3, "page 1")]
+    rows = stored_pages(event_id)
+    assert [x[1] for x in rows] == ["TKT-A", "TKT-B"] and len({x[3] for x in rows}) == 2
+    assert all(len(x[3]) == 64 for x in rows)
+    # the same PDF again: nothing new; a PDF with one new code: only that page is added
+    with SessionLocal() as db:
+        again = services.add_ticket_pdf(db, event_id, coded_pdf(["TKT-A", "TKT-B", "TKT-A"]))
+        mixed = services.add_ticket_pdf(db, event_id, coded_pdf(["TKT-B", "TKT-C"]))
+    assert again["pages"] == 0 and len(again["duplicates"]) == 3
+    assert mixed["pages"] == 1 and mixed["duplicates"] == [(1, "page 2")]
+    assert [x[1] for x in stored_pages(event_id)] == ["TKT-A", "TKT-B", "TKT-C"]
+
+
+def test_compressed_pages_keep_their_own_distinct_codes(event_id):
+    pytest.importorskip("zxingcpp")
+    pytest.importorskip("pypdfium2")
+    from app import pdfs
+    codes = [f"TICKET-{n:04d}" for n in range(6)]
+    pdf = coded_pdf(codes)
+    with SessionLocal() as db:
+        services.add_ticket_pdf(db, event_id, pdf)
+    rows = stored_pages(event_id)
+    assert [x[1] for x in rows] == codes                                   # six pages, six different codes
+    for _, code, path, digest in rows:
+        data = Path(path).read_bytes()
+        assert pdfs.read_codes(data) == code and pdfs.sha256_hex(data) == digest      # re-read from the stored file
+    assert sum(Path(x[2]).stat().st_size for x in rows) < len(pdf)
+
+
+def test_a_constant_code_on_every_page_is_not_treated_as_a_duplicate(event_id):
+    pytest.importorskip("zxingcpp")
+    pytest.importorskip("pypdfium2")
+    with SessionLocal() as db:
+        r = services.add_ticket_pdf(db, event_id, coded_pdf(["SAME-EVENT-CODE"] * 6))
+    assert r["pages"] == 6 and r["duplicates"] == [] and any("same code" in n for n in r["notes"])
+
+
+def test_existing_ticket_files_are_never_overwritten(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "STORAGE_DIR", tmp_path)
+    folder = services.event_ticket_dir(77)
+    folder.mkdir(parents=True)
+    (folder / "ticket_0001.pdf").write_bytes(b"precious")
+    result = services.split_pdf_pages(make_pdf(2), 77, start=1)
+    assert (folder / "ticket_0001.pdf").read_bytes() == b"precious"
+    assert len({p.path for p in result.pages}) == 2 and all(p.path.is_file() for p in result.pages)
+
+
+def test_audit_finds_shared_codes_and_changed_files(admin, event_id):
+    pytest.importorskip("zxingcpp")
+    pytest.importorskip("pypdfium2")
+    with SessionLocal() as db:
+        services.add_ticket_pdf(db, event_id, coded_pdf(["AUD-1", "AUD-2", "AUD-3"]))
+    ok = admin.get(f"/events/{event_id}/tickets/audit").text
+    assert "No problems found" in ok and "3 page(s) checked" in ok
+    rows = stored_pages(event_id)
+    Path(rows[1][2]).write_bytes(Path(rows[0][2]).read_bytes())          # page 2 now holds page 1's file
+    bad = admin.get(f"/events/{event_id}/tickets/audit").text
+    assert "Problems found" in bad and "Same QR code" in bad and "Identical files" in bad and "Changed since stored" in bad
+    assert admin.get(f"/events/{event_id}/tickets/audit", follow_redirects=True).status_code == 200

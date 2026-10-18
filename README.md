@@ -143,6 +143,13 @@ curl -X POST https://gatetickets.duckdns.org/api/tickets \
 * Pages are added to the pool and handed to guests like any upload. Sending the same file again changes nothing
   (`"duplicate": true`). The answer is JSON: `event_id`, `event`, `date`, `location`, `created_event`, `pages`, `assigned`, `spare`, `missing`.
 
+**Duplicate codes.** Every uploaded page is rendered and its QR code / barcode is read (pypdfium2 + zxing-cpp). A page whose code is already in the
+event - or repeats an earlier page of the same PDF - is **not stored** and is reported ("Skipped N duplicate page(s)"), so two tickets can never
+share a code. Each stored page also keeps its code and the SHA-256 of its file. A compressed page must still read the same code, otherwise it is
+stored uncompressed, and a file is never overwritten. If nearly every page of a big PDF carries the same code it is treated as a constant and
+not used for duplicate checks. **Check tickets for duplicates** (Manage page) re-reads every stored page and reports pages that share a code or
+a file, missing files and files changed since they were stored.
+
 **Compression.** Every ticket page is shrunk when the PDF is split (Settings → *Compress ticket PDFs*): page data is
 deflated, duplicate objects removed, huge images scaled to at most `PDF_IMAGE_MAX_PX` (1600) pixels. Flat images such
 as QR codes and barcodes are stored **losslessly**; only photo-like images are JPEG-compressed (`PDF_JPEG_QUALITY`, 80).

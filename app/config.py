@@ -98,3 +98,7 @@ SHIRT_MESSAGE = os.getenv("SHIRT_MESSAGE", "היי {name}, כדי שנוכל ל�
 # (status ERROR, e.g. code 463) is switched to "not functioning" so the next send uses another line.
 LINE_ERROR_STREAK = int(os.getenv("LINE_ERROR_STREAK", "2"))
 EVOLUTION_WEBHOOK_TOKEN = os.getenv("EVOLUTION_WEBHOOK_TOKEN", "").strip() or EVOLUTION_API_KEY
+
+# Every ticket page is read for its QR code / barcode when it is uploaded: a page whose code is already in the event is
+# skipped (a duplicate would let two people in on one code), and a compressed page must still carry the same code.
+QR_RENDER_SCALE = float(os.getenv("QR_RENDER_SCALE", "2.0"))        # 2.0 = 144 dpi

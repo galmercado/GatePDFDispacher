@@ -40,7 +40,7 @@ from .services import (
     AttendeeIn, ImportValidationError, describe_validation_error, PdfProcessingError, WhatsAppError, add_ticket_pdf, delete_whatsapp_message,
     import_attendees,
     GridRow, MemberBook, RegistrationError, evolution_connect, evolution_create_instance, evolution_list_instances, evolution_owner_number, evolution_set_profile, evolution_delete_instance, evolution_state,
-    event_ticket_dir, fetch_registration_page, name_keys, normalize_phone, parse_registration_grid, parse_member_file, parse_member_text, parse_registration_html, parse_rows, parse_guest_list, rebalance_tickets, release_tickets, send_whatsapp_pdf, send_whatsapp_text, ticket_status,
+    event_ticket_dir, fetch_registration_page, name_keys, normalize_phone, parse_registration_grid, parse_member_file, parse_member_text, parse_registration_html, parse_rows, parse_guest_list, rebalance_tickets, release_tickets, audit_tickets, send_whatsapp_pdf, send_whatsapp_text, ticket_status,
 )
 
 log = logging.getLogger("gate")
@@ -779,6 +779,17 @@ def skip_all_import_issues(event_id: int, request: Request, user: User = Depends
     return render(request, "manage.html", manage_ctx(db, user, event, messages=[f"Skipped {n} row(s)."]))
 
 
+def upload_notes(result: dict) -> list[str]:
+    """Plain sentences about duplicate pages and unreadable codes found while adding ticket pages."""
+    out = []
+    dups = result.get("duplicates") or []
+    if dups:
+        shown = ", ".join(f"page {n} (same code as {of})" for n, of in dups[:8]) + (" …" if len(dups) > 8 else "")
+        out.append(f"Skipped {len(dups)} duplicate page(s) of the PDF: {shown}.")
+    out.extend(n for n in result.get("notes") or [] if not n.startswith("Skipped"))
+    return out
+
+
 @app.post("/events/{event_id}/tickets/upload", response_class=HTMLResponse)
 async def upload_ticket_pdf(
     event_id: int, request: Request, file: UploadFile = File(...), replace: str = Form(""),
@@ -796,7 +807,7 @@ async def upload_ticket_pdf(
     msgs = [f"Added {result['pages']} page(s); assigned {result['assigned']} ticket(s) to guests."]
     if result["spare"]:
         msgs.append(f"{result['spare']} spare page(s) are waiting for new guests.")
-    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs))
+    return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, warnings=upload_notes(result)))
 
 
 DRIVE_PROGRESS: dict[str, dict] = {}      # progress token -> {"pct": 0-100, "stage": "download" | "process"}
@@ -839,6 +850,7 @@ async def upload_tickets_from_drive(
             continue
         msgs.append(f"Drive file {index + 1}: added {result['pages']} page(s); assigned {result['assigned']} ticket(s) to guests."
                     + (f" {result['spare']} spare." if result["spare"] else ""))
+        msgs.extend(upload_notes(result))
     DRIVE_PROGRESS.pop(token, None)
     return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, errors=errors),
                   status=422 if errors and not msgs else 200)
@@ -918,7 +930,16 @@ async def api_upload_tickets(
     return {"ok": True, "duplicate": False, "created_event": created, "event_id": event.id, "event": event.name,
             "date": event.event_date.isoformat(timespec="minutes"), "location": event.location, "opponent": info["opponent"],
             "seating": info["seating"], "pages": result["pages"], "assigned": result["assigned"],
-            "spare": result["spare"], "missing": result["missing"]}
+            "spare": result["spare"], "missing": result["missing"],
+            "duplicate_pages": [{"page": n, "same_code_as": of} for n, of in result["duplicates"]],
+            "pages_without_readable_code": result["unreadable"]}
+
+
+@app.get("/events/{event_id}/tickets/audit", response_class=HTMLResponse)
+def audit_ticket_files(event_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Re-read every stored ticket page: unchanged files, QR codes, and pages that share a code or a file."""
+    event = get_event_or_404(db, event_id)
+    return render(request, "manage.html", manage_ctx(db, user, event, audit=audit_tickets(db, event.id)))
 
 
 @app.post("/events/{event_id}/delete", response_class=HTMLResponse)

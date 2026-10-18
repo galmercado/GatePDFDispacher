@@ -126,6 +126,8 @@ class Ticket(Base):
     )
     page_number: Mapped[int] = mapped_column(Integer)
     file_path: Mapped[str] = mapped_column(String(512))
+    qr_code: Mapped[str] = mapped_column(String(600), default="", index=True)    # what the page's QR code / barcode says ("" = none readable)
+    file_hash: Mapped[str] = mapped_column(String(64), default="")              # SHA-256 of the stored PDF file
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # sent via WhatsApp / shown as QR
     send_failed: Mapped[bool] = mapped_column(Boolean, default=False)   # WhatsApp reported that the message was not delivered
     claim_token: Mapped[str] = mapped_column(
@@ -147,6 +149,8 @@ class SpareTicket(Base):
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
     page_number: Mapped[int] = mapped_column(Integer)
     file_path: Mapped[str] = mapped_column(String(512))
+    qr_code: Mapped[str] = mapped_column(String(600), default="", index=True)
+    file_hash: Mapped[str] = mapped_column(String(64), default="")
 
 
 class SentMessage(Base):
