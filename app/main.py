@@ -33,8 +33,10 @@ from .auth import (
 from . import lines as linesmod
 from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
-from .models import AppSetting, Attendee, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Member, TicketBundle, Ticket, User, utcnow
+from .models import AppSetting, Attendee, InboxEntry, TicketSource, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Member, TicketBundle, Ticket, User, utcnow
 from .messages import ticket_caption
+from . import inbox as inboxmod
+from .inbox import match_or_create_event
 from .progress import Reporter, status as job_status
 from .pdfs import DriveError, fetch_drive_pdf, parse_ticket_header, read_ticket_meta
 from .services import (
@@ -865,31 +867,6 @@ def api_error(status: int, detail: str) -> JSONResponse:
     return JSONResponse({"ok": False, "error": detail}, status_code=status)
 
 
-def match_or_create_event(db: Session, header: dict, meta: dict) -> tuple[Event | None, bool, str]:
-    """The event a ticket file belongs to: same opponent and same day. Without a date on the first page the nearest
-    upcoming game against that opponent. Creates the event when the date is known but nothing matches.
-    Returns (event, created, problem)."""
-    from .pdfs import _letters
-    opponent = header["opponent"]
-    key = _letters(opponent)
-    games = [e for e in db.query(Event).order_by(Event.event_date).all() if key and key in _letters(e.name)]
-    when = meta["when"]
-    if when is None:
-        upcoming = [e for e in games if e.event_date >= utcnow() - timedelta(days=1)]
-        if upcoming:
-            return upcoming[0], False, ""
-        return None, False, "No date found on the first page and no existing game against " + opponent + "."
-    for event in games:
-        if abs((event.event_date.date() - when.date()).days) == 0:
-            return event, False, ""
-    place = meta["location"] or ("" if header["away"] else data.DEFAULT_LOCATION)
-    event = Event(name=f"{data.HOME_TEAM} {data.VERSUS} {opponent}", location=place,
-                  event_date=when if meta["has_time"] else when.replace(hour=20))
-    db.add(event)
-    db.commit()
-    return event, True, ""
-
-
 @app.post("/api/tickets")
 async def api_upload_tickets(
     request: Request, file: UploadFile = File(None), header: str = Form(""), url: str = Form(""),
@@ -965,6 +942,7 @@ def delete_event(event_id: int, request: Request, user: User = Depends(require_a
     for model in (SentMessage, SpareTicket, ImportIssue, Ticket):
         db.query(model).filter(model.event_id == event.id).delete()
     db.query(AppSetting).filter(AppSetting.key.like(f"tkh.{event.id}.%")).delete(synchronize_session=False)
+    db.query(TicketSource).filter(TicketSource.event_id == event.id).update({TicketSource.event_id: None})
     db.query(Attendee).filter(Attendee.event_id == event.id).delete()
     db.delete(event)
     db.commit()
@@ -1623,6 +1601,9 @@ async def stray_instances(db: Session) -> list[dict]:
     return [i for i in await evolution_list_instances() if i["name"] not in known]
 
 
+background_tasks: set = set()                       # keeps references so running jobs are not garbage-collected
+
+
 @app.post("/webhooks/evolution", include_in_schema=False)
 async def evolution_webhook(request: Request, token: str = "", db: Session = Depends(get_db)):
     """Delivery reports (messages.update) pushed by Evolution: tells us when WhatsApp refused a message that Evolution had
@@ -1633,7 +1614,11 @@ async def evolution_webhook(request: Request, token: str = "", db: Session = Dep
         body = await request.json()
     except ValueError:
         return JSONResponse({"ok": False}, status_code=400)
-    if str(body.get("event", "")).lower().replace("_", ".") != "messages.update":
+    event_name = str(body.get("event", "")).lower().replace("_", ".")
+    if event_name == "messages.upsert":              # a received message: may be a ticket PDF from a configured number
+        background_tasks.add(asyncio.ensure_future(inboxmod.process_webhook(body)))
+        return {"ok": True, "queued": True}
+    if event_name != "messages.update":
         return {"ok": True, "ignored": True}
     items = body.get("data")
     results = []
@@ -1643,6 +1628,83 @@ async def evolution_webhook(request: Request, token: str = "", db: Session = Dep
         results.append(linesmod.apply_delivery_update(db, str(body.get("instance") or body.get("instanceName") or ""),
                                                       str(item.get("keyId") or ""), str(item.get("status") or "")))
     return {"ok": True, "results": results}
+
+
+# --------------------------------------------------------------------------- ticket inbox (PDFs received on WhatsApp)
+
+def inbox_ctx(db: Session, user: User, **extra) -> dict:
+    sources = db.query(TicketSource).order_by(TicketSource.id).all()
+    entries = db.query(InboxEntry).order_by(InboxEntry.id.desc()).limit(80).all()
+    events = db.query(Event).order_by(Event.event_date.desc()).limit(60).all()
+    names = {e.id: e.name for e in events}
+    known = {s.phone for s in sources}
+    return {"user": user, "sources": sources, "entries": entries, "events": events, "event_names": names, "known": known,
+            "messages": [], "errors": [], **extra}
+
+
+@app.get("/inbox", response_class=HTMLResponse)
+def inbox_page(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return render(request, "inbox.html", inbox_ctx(db, user))
+
+
+def parse_source_event(db: Session, value: str) -> int | None:
+    return int(value) if value.strip().isdigit() and db.get(Event, int(value)) else None
+
+
+@app.post("/inbox/sources", response_class=HTMLResponse)
+def add_ticket_source(request: Request, label: str = Form(""), phone: str = Form(""), event_id: str = Form(""),
+                      user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    digits = re.sub(r"\D", "", normalize_phone(phone)) if phone.strip() else ""
+    if not 7 <= len(digits) <= 20:
+        return render(request, "inbox.html", inbox_ctx(db, user, errors=["Enter the WhatsApp number the tickets come from."]), status=422)
+    if db.query(TicketSource).filter(TicketSource.phone == digits).first():
+        return render(request, "inbox.html", inbox_ctx(db, user, errors=["That number is already on the list."]), status=422)
+    label = " ".join(label.split())[:64] or f"+{digits}"
+    db.add(TicketSource(label=label, phone=digits, event_id=parse_source_event(db, event_id)))
+    db.commit()
+    return render(request, "inbox.html", inbox_ctx(db, user, messages=[f"{label} can now send tickets by WhatsApp."]))
+
+
+@app.post("/inbox/allow", response_class=HTMLResponse)
+def allow_inbox_sender(request: Request, sender: str = Form(""), label: str = Form(""),
+                       user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """One click from the list of received files: use this sender's PDFs as tickets from now on."""
+    digits = re.sub(r"\D", "", sender)
+    if not 7 <= len(digits) <= 20 or db.query(TicketSource).filter(TicketSource.phone == digits).first():
+        return render(request, "inbox.html", inbox_ctx(db, user, errors=["That sender is already allowed or invalid."]), status=422)
+    label = " ".join(label.split())[:64] or f"+{digits}"
+    db.add(TicketSource(label=label, phone=digits))
+    db.commit()
+    return render(request, "inbox.html", inbox_ctx(db, user, messages=[
+        f"{label} is allowed. Send the PDF again - files that already arrived are not processed retroactively."]))
+
+
+@app.post("/inbox/sources/{source_id}/update", response_class=HTMLResponse)
+def update_ticket_source(source_id: int, request: Request, event_id: str = Form(""), active: str = Form(""),
+                         user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    source = db.get(TicketSource, source_id)
+    if source is None:
+        raise HTTPException(404, "Number not found")
+    source.event_id = parse_source_event(db, event_id)
+    source.active = active == "on"
+    db.commit()
+    return render(request, "inbox.html", inbox_ctx(db, user, messages=[f"Saved {source.label}."]))
+
+
+@app.post("/inbox/sources/{source_id}/delete", response_class=HTMLResponse)
+def delete_ticket_source(source_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    source = db.get(TicketSource, source_id)
+    if source is not None:
+        db.delete(source)
+        db.commit()
+    return render(request, "inbox.html", inbox_ctx(db, user, messages=["Number removed."]))
+
+
+@app.post("/inbox/clear", response_class=HTMLResponse)
+def clear_inbox_log(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    db.query(InboxEntry).delete()
+    db.commit()
+    return render(request, "inbox.html", inbox_ctx(db, user, messages=["The list was cleared."]))
 
 
 @app.get("/lines", response_class=HTMLResponse)

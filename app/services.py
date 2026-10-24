@@ -1196,6 +1196,27 @@ async def evolution_list_instances(client: httpx.AsyncClient | None = None) -> l
     return out
 
 
+async def evolution_media_base64(instance: str, message: dict, client: httpx.AsyncClient | None = None) -> tuple[bytes, str, str]:
+    """Download the file of a received WhatsApp message through Evolution. Returns (bytes, mimetype, file name).
+    First asks by message key (Evolution looks the stored message up); if that fails, hands over the whole message."""
+    key = message.get("key") or {}
+    last: WhatsAppError | None = None
+    for payload in ({"message": {"key": {"id": key.get("id")}}, "convertToMp4": False},
+                    {"message": message, "convertToMp4": False}):
+        try:
+            resp = await _gateway_call("POST", "/chat/getBase64FromMediaMessage", payload, client, instance, throttled=False)
+            body = resp.json()
+        except (WhatsAppError, ValueError) as exc:
+            last = exc if isinstance(exc, WhatsAppError) else WhatsAppError(f"Unreadable answer: {exc}")
+            continue
+        raw = body.get("base64") or ""
+        if raw:
+            if len(raw) > config.MAX_PDF_BYTES * 4 // 3 + 100:
+                raise WhatsAppError("The file is too large")
+            return base64.b64decode(raw.split(",", 1)[-1]), str(body.get("mimetype") or ""), str(body.get("fileName") or "")
+    raise last or WhatsAppError("Evolution returned no file")
+
+
 async def evolution_owner_number(name: str, client: httpx.AsyncClient | None = None) -> str | None:
     """The phone number the instance is linked to (digits), or None if unknown / not linked yet."""
     try:

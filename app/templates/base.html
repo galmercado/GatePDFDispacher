@@ -42,6 +42,7 @@
         <span class="hidden text-slate-400 sm:inline">{{ user.full_name }}
           <span class="ml-1 rounded-full bg-slate-800 px-2 py-0.5 text-xs uppercase tracking-wide text-slate-300">{{ user.role.value }}</span></span>
         {% if user.role.value == 'admin' %}<a href="/lines" class="text-slate-300 hover:text-white" aria-label="WhatsApp lines" title="WhatsApp lines"><i class="ph ph-sim-card text-lg"></i></a>
+        <a href="/inbox" class="text-slate-300 hover:text-white" aria-label="Ticket inbox" title="Ticket inbox (tickets received on WhatsApp)"><i class="ph ph-tray-arrow-down text-lg"></i></a>
         <a href="/settings" class="text-slate-300 hover:text-white" aria-label="Site settings" title="Site settings"><i class="ph ph-sliders-horizontal text-lg"></i></a>
         <a href="/members" class="text-slate-300 hover:text-white" aria-label="Members phone book" title="Members phone book"><i class="ph ph-address-book text-lg"></i></a>
         <a href="/users" class="text-slate-300 hover:text-white" aria-label="Users"><i class="ph ph-users text-lg"></i></a>{% endif %}

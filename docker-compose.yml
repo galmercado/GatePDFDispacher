@@ -61,6 +61,8 @@ services:
       WEBHOOK_GLOBAL_URL: http://app:8000/webhooks/evolution?token=${EVOLUTION_API_KEY}
       WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: "false"
       WEBHOOK_EVENTS_MESSAGES_UPDATE: "true"
+      # Received messages: PDFs from the numbers on the Ticket inbox page become tickets.
+      WEBHOOK_EVENTS_MESSAGES_UPSERT: "true"
       DATABASE_SAVE_MESSAGE_UPDATE: "false"
       DATABASE_SAVE_DATA_CONTACTS: "false"
       DATABASE_SAVE_DATA_CHATS: "false"

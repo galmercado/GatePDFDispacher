@@ -3058,3 +3058,144 @@ def test_whatsapp_sends_have_no_popup_and_the_popup_waits_five_seconds(admin, do
     for url in (f"/attendees/{att}/partial-form", f"/attendees/{att}/resend-form", f"/attendees/{att}/shirt-form"):
         assert "data-progress" not in doorman.get(url).text
     assert "opts.delay === undefined ? 5000" in admin.get(f"/events/{event_id}/manage").text
+
+
+# --------------------------------------------------------------------------- ticket inbox (PDFs received on WhatsApp)
+
+def wa_doc(msg_id, sender="972501110000", name="tickets.pdf", mime="application/pdf", caption="", from_me=False, wrapped=False, jid=None):
+    doc = {"fileName": name, "mimetype": mime}
+    if caption:
+        doc["caption"] = caption
+    message = {"documentWithCaptionMessage": {"message": {"documentMessage": doc}}} if wrapped else {"documentMessage": doc}
+    return {"key": {"id": msg_id, "fromMe": from_me, "remoteJid": jid or f"{sender}@s.whatsapp.net"}, "pushName": "Dana",
+            "message": message, "messageType": "documentMessage"}
+
+
+def run_inbox(item, content=None, fail=None, instance="event-door-1"):
+    import asyncio
+    from app import inbox
+
+    async def fetch(inst, message):
+        if fail:
+            raise services.WhatsAppError(fail)
+        return content, "application/pdf", "x.pdf"
+
+    async def go():
+        with SessionLocal() as db:
+            return await inbox.handle_message(db, instance, item, fetch)
+
+    return asyncio.run(go())
+
+
+@pytest.fixture()
+def source(client, admin, event_id):
+    from app.models import TicketSource
+    with SessionLocal() as db:
+        db.query(TicketSource).delete()
+        row = TicketSource(label="Office", phone="972501110000", event_id=event_id)
+        db.add(row)
+        db.commit()
+    return "972501110000"
+
+
+def inbox_rows():
+    from app.models import InboxEntry
+    with SessionLocal() as db:
+        return [(r.status, r.detail, r.pages, r.event_id) for r in db.query(InboxEntry).order_by(InboxEntry.id)]
+
+
+def test_extract_document_and_sender_numbers():
+    from app import inbox
+    assert inbox.extract_document(wa_doc("a", caption="hi", wrapped=True)) == {"file_name": "tickets.pdf", "mimetype": "application/pdf", "caption": "hi"}
+    assert inbox.extract_document({"message": {"conversation": "hello"}}) is None
+    item = wa_doc("b", jid="149147873210431@lid")
+    item["key"]["remoteJidAlt"] = "972501110000@s.whatsapp.net"
+    assert inbox.sender_numbers(item) == {"149147873210431", "972501110000"}
+    group = {"key": {"remoteJid": "1203@g.us", "participant": "972502220000@s.whatsapp.net"}}
+    assert inbox.sender_numbers(group) == {"972502220000"}
+
+
+def test_a_pdf_from_a_configured_number_becomes_tickets_for_its_match(event_id, source):
+    pytest.importorskip("zxingcpp")
+    pdf = coded_pdf(["IN-1", "IN-2", "IN-3"])
+    assert run_inbox(wa_doc("m1"), pdf) == "accepted"
+    rows = stored_pages(event_id)
+    assert [x[1] for x in rows] == ["IN-1", "IN-2", "IN-3"]
+    assert inbox_rows()[-1][0] == "accepted" and "Stored 3 page(s)" in inbox_rows()[-1][1] and inbox_rows()[-1][3] == event_id
+    assert run_inbox(wa_doc("m1"), pdf) == ""                                   # the same webhook delivered twice
+    assert run_inbox(wa_doc("m2"), pdf) == "duplicate"                           # the same file sent again
+    assert len(stored_pages(event_id)) == 3
+    assert run_inbox(wa_doc("m3"), coded_pdf(["IN-3", "IN-4"])) == "accepted"   # one new ticket among old ones
+    assert [x[1] for x in stored_pages(event_id)] == ["IN-1", "IN-2", "IN-3", "IN-4"]
+
+
+def test_files_from_other_numbers_and_other_kinds_are_not_tickets(event_id, source):
+    pdf = coded_pdf(["X-1"])
+    assert run_inbox(wa_doc("u1", sender="972509998888"), pdf) == "unknown"
+    assert stored_pages(event_id) == []
+    assert inbox_rows()[-1][0] == "unknown"
+    assert run_inbox(wa_doc("u2", sender="972509998888", name="photo.png", mime="image/png"), pdf) == ""     # not even listed
+    assert run_inbox(wa_doc("u3", from_me=True), pdf) == ""                                                    # our own message
+    assert run_inbox(wa_doc("u4", name="a.png", mime="image/png"), pdf) == "rejected"                         # allowed sender, not a PDF
+    assert run_inbox(wa_doc("u5"), b"not a pdf") == "rejected"
+    assert run_inbox(wa_doc("u6"), fail="gateway down") == "error"
+    assert stored_pages(event_id) == []
+
+
+def test_match_is_found_from_the_caption_or_falls_back_to_the_next_match(event_id, source):
+    from app.models import TicketSource
+    with SessionLocal() as db:
+        db.query(TicketSource).update({TicketSource.event_id: None})
+        other = Event(name="מכבי תל אביב נגד הפועל אילת", location="Hall", event_date=datetime.utcnow() + timedelta(days=5))
+        db.add(other)
+        db.commit()
+        other_id = other.id
+    assert run_inbox(wa_doc("c1", caption='קיבלת כרטיסים למכבי ת"א - הפועל אילת - לא מסומן'), make_pdf(2)) == "accepted"
+    assert [r for r in inbox_rows() if r[3] == other_id] and "found from the file" in inbox_rows()[-1][1]
+    assert run_inbox(wa_doc("c2", name="whatever.pdf"), make_pdf(3)) == "accepted"          # nothing readable: the next upcoming match
+    with SessionLocal() as db:
+        nxt = db.query(Event).filter(Event.event_date >= datetime.utcnow() - timedelta(days=1)).order_by(Event.event_date).first().id
+    assert inbox_rows()[-1][3] == nxt and "next upcoming match" in inbox_rows()[-1][1]
+
+
+def test_webhook_queues_received_messages_and_inbox_page_manages_numbers(admin, doorman, client, event_id, monkeypatch):
+    from app import inbox
+    from app.models import TicketSource
+    seen = []
+
+    async def fake(body, fetch_media=None):
+        seen.append(body["instance"])
+
+    monkeypatch.setattr(inbox, "process_webhook", fake)
+    monkeypatch.setattr(config, "EVOLUTION_WEBHOOK_TOKEN", "hook-secret")
+    body = {"event": "messages.upsert", "instance": "event-door-3", "data": wa_doc("w1")}
+    assert client.post("/webhooks/evolution?token=nope", json=body).status_code == 401
+    r = client.post("/webhooks/evolution?token=hook-secret", json=body)
+    assert r.json() == {"ok": True, "queued": True}
+    assert doorman.get("/inbox").status_code == 403
+    page = admin.get("/inbox").text
+    assert "Ticket inbox" in page and "Numbers that send tickets" in page
+    with SessionLocal() as db:
+        db.query(TicketSource).delete()
+        db.commit()
+    assert admin.post("/inbox/sources", data={"label": "Box office", "phone": "052-3334444", "event_id": str(event_id)}).status_code == 200
+    with SessionLocal() as db:
+        row = db.query(TicketSource).one()
+        assert row.phone == "972523334444" and row.event_id == event_id and row.active
+        sid = row.id
+    assert admin.post("/inbox/sources", data={"label": "again", "phone": "0523334444"}).status_code == 422
+    assert admin.post("/inbox/sources", data={"label": "bad", "phone": ""}).status_code == 422
+    admin.post(f"/inbox/sources/{sid}/update", data={"event_id": ""})                  # not active, detect from the file
+    with SessionLocal() as db:
+        row = db.get(TicketSource, sid)
+        assert row.event_id is None and row.active is False
+    assert run_inbox(wa_doc("w2", sender="972523334444"), make_pdf(1)) == "unknown"        # paused numbers are like unknown ones
+    assert "Allow this sender" in admin.get("/inbox").text or "Unknown sender" in admin.get("/inbox").text
+    admin.post("/inbox/allow", data={"sender": "972507776666", "label": "Dana"})
+    with SessionLocal() as db:
+        assert db.query(TicketSource).filter_by(phone="972507776666").count() == 1
+    admin.post(f"/inbox/sources/{sid}/delete")
+    admin.post("/inbox/clear")
+    with SessionLocal() as db:
+        assert db.query(TicketSource).filter_by(id=sid).count() == 0
+    assert inbox_rows() == []

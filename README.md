@@ -158,6 +158,18 @@ A re-encoded image is used only if it is really smaller. Tests decode the QR cod
 **Retention.** Ticket PDFs are deleted `TICKET_RETENTION_DAYS` (default 30) after the event ends, checked every 10 minutes
 (Settings → Cleanup; 0 keeps them). Guests and attendance stay; the tickets lose their file, so old download links stop working.
 
+### Ticket inbox: tickets received on WhatsApp
+
+On the **Ticket inbox** page (tray icon in the top bar, admins only) you list the WhatsApp numbers that send you tickets. When one of them sends a **PDF** to
+any of your lines, the file is stored like an upload (pages split, duplicate QR codes skipped, compressed, handed to guests). Per number you choose the match:
+a fixed match, or *detect* - the caption / file name (`קיבלת כרטיסים ל… - …`) and the first page are read like the upload API, with the next upcoming match as
+the fallback. PDFs from any other number are only listed under *Received files*, with an **Allow this sender** button (also the way to add a sender
+that WhatsApp shows as an internal id instead of a phone number). Each file shows what happened: stored, already had it, not used (and why), or error.
+
+It needs Evolution to report received messages: `WEBHOOK_EVENTS_MESSAGES_UPSERT` is set in `docker-compose.yml` (recreate with
+`docker compose --profile prod up -d --force-recreate evolution-api app`). Evolution also has to keep received messages (`DATABASE_SAVE_DATA_NEW_MESSAGE=true`,
+already set) so the app can download the PDF through it.
+
 ### Progress popup for long actions
 
 Every long action (guest list and registration imports, ticket PDF upload with QR checking and compression,

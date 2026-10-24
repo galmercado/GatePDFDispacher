@@ -261,3 +261,34 @@ class TicketBundle(Base):
     attendee_id: Mapped[int] = mapped_column(ForeignKey("attendees.id", ondelete="CASCADE"), index=True)
     ticket_ids: Mapped[str] = mapped_column(Text)            # JSON list
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TicketSource(Base):
+    """A WhatsApp number whose PDF files are taken as tickets (configured on the Ticket inbox page)."""
+
+    __tablename__ = "ticket_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    label: Mapped[str] = mapped_column(String(64))
+    phone: Mapped[str] = mapped_column(String(32), unique=True, index=True)          # digits as WhatsApp reports them
+    event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)             # fixed match; None = detect from the file
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class InboxEntry(Base):
+    """Every PDF that arrived on WhatsApp: what was done with it (stored as tickets, rejected, or from an unknown sender)."""
+
+    __tablename__ = "inbox_entries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    instance: Mapped[str] = mapped_column(String(64), default="")
+    sender: Mapped[str] = mapped_column(String(64), default="", index=True)          # digits
+    sender_name: Mapped[str] = mapped_column(String(128), default="")
+    message_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    file_name: Mapped[str] = mapped_column(String(255), default="")
+    status: Mapped[str] = mapped_column(String(16), default="unknown")   # accepted | duplicate | rejected | error | unknown
+    detail: Mapped[str] = mapped_column(Text, default="")
+    event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pages: Mapped[int] = mapped_column(Integer, default=0)
