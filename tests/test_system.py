@@ -3245,3 +3245,38 @@ def test_a_late_download_is_retried_and_a_crash_leaves_an_error_entry(event_id, 
     rows = inbox_rows()
     assert rows[-1][0] == "error" and "boom" in rows[-1][1]
     assert len(stored_pages(event_id)) == 2
+
+
+def test_guest_imports_and_ticket_uploads_running_together_never_hand_out_a_page_twice(admin, event_id):
+    """The reported crash: UNIQUE constraint failed: tickets.event_id, tickets.page_number (two rebalances at once)."""
+    pytest.importorskip("zxingcpp")
+    import threading
+    rows = [{"name": f"Race {i}", "phone": f"05011{i:05d}", "adult": 1, "youth": 0} for i in range(40)]
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(rows).encode())})
+    errors = []
+
+    def uploader():
+        try:
+            for k in range(4):
+                with SessionLocal() as db:
+                    services.add_ticket_pdf(db, event_id, coded_pdf([f"RC{k}-{j}" for j in range(5)]))
+        except Exception as exc:                                  # noqa: BLE001
+            errors.append(exc)
+
+    def rebalancer():
+        try:
+            for _ in range(60):
+                with SessionLocal() as db:
+                    services.rebalance_tickets(db, event_id)
+        except Exception as exc:                                  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=uploader), threading.Thread(target=rebalancer), threading.Thread(target=rebalancer)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    with SessionLocal() as db:
+        pages = [t.page_number for t in db.query(Ticket).filter(Ticket.event_id == event_id)]
+    assert len(pages) == len(set(pages)) == 20

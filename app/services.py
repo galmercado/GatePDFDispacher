@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 from pypdf import PdfReader, PdfWriter
 from pypdf.errors import PyPdfError
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from . import config, data
@@ -665,7 +666,21 @@ def ticket_status(db: Session, event_id: int) -> dict:
             "spare": spare}
 
 
+_REBALANCE_LOCK = threading.RLock()      # handing spare pages to guests: two runs at once would give the same page to two guests
+
+
 def rebalance_tickets(db: Session, event_id: int) -> dict:
+    """Keep every guest's tickets in line with their ticket_count (see _rebalance_tickets). Runs one at a time - a guest
+    import, an edit and a ticket upload can all trigger it together - and is retried once if the database still objects."""
+    with _REBALANCE_LOCK:
+        try:
+            return _rebalance_tickets(db, event_id)
+        except IntegrityError:
+            db.rollback()
+            return _rebalance_tickets(db, event_id)
+
+
+def _rebalance_tickets(db: Session, event_id: int) -> dict:
     """Keep every guest's tickets in line with their ticket_count using the event's spare pages.
 
     1. Guests holding more tickets than they should (count lowered / guest removed elsewhere)
@@ -717,13 +732,13 @@ def release_tickets(db: Session, attendee: Attendee) -> None:
     db.expire(attendee, ["tickets"])  # already deleted; don't let a later cascade delete them twice
 
 
-_POOL_LOCK = threading.Lock()      # one ticket upload at a time: page numbers and the duplicate check must not race
+_UPLOAD_LOCK = threading.Lock()      # one ticket upload at a time: page numbers and the duplicate check must not race
 
 
 def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = False, progress=None) -> dict:
     """Add the pages of a PDF to the event's ticket pool (uploads, Drive, API and WhatsApp can all arrive at once; they
     are processed one after the other). See _add_ticket_pdf."""
-    with _POOL_LOCK:
+    with _UPLOAD_LOCK:
         db.expire_all()
         return _add_ticket_pdf(db, event_id, content, replace, progress)
 

@@ -904,7 +904,7 @@ async def api_upload_tickets(
                                            or db.query(SpareTicket).filter(SpareTicket.event_id == event.id).first()):
             return {"ok": True, "duplicate": True, "event_id": event.id, "event": event.name,
                     "message": "This exact file was uploaded before - nothing changed."}
-        result = add_ticket_pdf(db, event.id, content)
+        result = await asyncio.to_thread(add_ticket_pdf, db, event.id, content)
     except (DriveError, PdfProcessingError) as exc:
         return api_error(422, str(exc))
     db.merge(AppSetting(key=digest, value=utcnow().isoformat()))
