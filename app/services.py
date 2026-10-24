@@ -7,6 +7,7 @@ import logging
 import random
 import re
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import NamedTuple
@@ -716,7 +717,18 @@ def release_tickets(db: Session, attendee: Attendee) -> None:
     db.expire(attendee, ["tickets"])  # already deleted; don't let a later cascade delete them twice
 
 
+_POOL_LOCK = threading.Lock()      # one ticket upload at a time: page numbers and the duplicate check must not race
+
+
 def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = False, progress=None) -> dict:
+    """Add the pages of a PDF to the event's ticket pool (uploads, Drive, API and WhatsApp can all arrive at once; they
+    are processed one after the other). See _add_ticket_pdf."""
+    with _POOL_LOCK:
+        db.expire_all()
+        return _add_ticket_pdf(db, event_id, content, replace, progress)
+
+
+def _add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = False, progress=None) -> dict:
     """Add the pages of a (merged) PDF to the event's ticket pool and hand them out.
 
     Additive by default: later uploads top up guests who are still missing tickets.

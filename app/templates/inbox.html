@@ -52,8 +52,8 @@
     {% if entries %}<form method="post" action="/inbox/clear" onsubmit="return confirm('Clear this list? Stored tickets are not affected.')"><button class="text-xs text-slate-400 underline hover:text-white">Clear list</button></form>{% endif %}
   </div>
   <ul class="space-y-2">
-    {% set tone = {'accepted': 'bg-emerald-500/15 text-emerald-300', 'duplicate': 'bg-slate-700 text-slate-300', 'rejected': 'bg-amber-500/15 text-amber-300', 'error': 'bg-rose-500/15 text-rose-300', 'unknown': 'bg-sky-500/15 text-sky-300'} %}
-    {% set text = {'accepted': 'Stored', 'duplicate': 'Already had it', 'rejected': 'Not used', 'error': 'Error', 'unknown': 'Unknown sender'} %}
+    {% set tone = {'accepted': 'bg-emerald-500/15 text-emerald-300', 'duplicate': 'bg-slate-700 text-slate-300', 'rejected': 'bg-amber-500/15 text-amber-300', 'error': 'bg-rose-500/15 text-rose-300', 'unknown': 'bg-sky-500/15 text-sky-300', 'processing': 'bg-sky-500/15 text-sky-300 animate-pulse'} %}
+    {% set text = {'accepted': 'Stored', 'duplicate': 'Already had it', 'rejected': 'Not used', 'error': 'Error', 'unknown': 'Unknown sender', 'processing': 'Processing…'} %}
     {% for x in entries %}
     <li class="rounded-xl border border-slate-800 p-3 text-sm">
       <div class="flex flex-wrap items-center justify-between gap-2">

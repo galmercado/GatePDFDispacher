@@ -3199,3 +3199,49 @@ def test_webhook_queues_received_messages_and_inbox_page_manages_numbers(admin, 
     with SessionLocal() as db:
         assert db.query(TicketSource).filter_by(id=sid).count() == 0
     assert inbox_rows() == []
+
+
+def test_fifteen_files_sent_at_once_are_all_stored(event_id, source):
+    """A burst of PDFs (webhooks arrive together) must all be stored, none lost to a race."""
+    pytest.importorskip("zxingcpp")
+    import asyncio
+    from app import inbox
+    files = {f"burst-{i}": coded_pdf([f"B{i}-A", f"B{i}-B"]) for i in range(15)}
+
+    async def fetch(inst, message):
+        return files[message["key"]["id"]], "application/pdf", "x.pdf"
+
+    async def go():
+        bodies = [{"event": "messages.upsert", "instance": "event-door-1", "data": wa_doc(mid, name=f"{mid}.pdf")} for mid in files]
+        return await asyncio.gather(*(inbox.process_webhook(b, fetch) for b in bodies))
+
+    asyncio.run(go())
+    assert len(stored_pages(event_id)) == 30
+    rows = [r for r in inbox_rows()]
+    assert len(rows) == 15 and all(r[0] == "accepted" for r in rows), rows
+
+
+def test_a_late_download_is_retried_and_a_crash_leaves_an_error_entry(event_id, source, monkeypatch):
+    import asyncio
+    from app import inbox
+    monkeypatch.setattr(inbox, "DOWNLOAD_ATTEMPTS", (0, 0, 0))
+    tries = {"n": 0}
+
+    async def flaky(inst, message):
+        tries["n"] += 1
+        if tries["n"] < 3:
+            raise services.WhatsAppError("Message not found")
+        return make_pdf(2), "application/pdf", "x.pdf"
+
+    async def go(body, fetch):
+        return await inbox.process_webhook(body, fetch)
+
+    assert asyncio.run(go({"instance": "i", "data": wa_doc("r1")}, flaky)) == ["accepted"] and tries["n"] == 3
+
+    async def crash(inst, message):
+        raise RuntimeError("boom")
+
+    asyncio.run(go({"instance": "i", "data": wa_doc("r2", name="crash.pdf")}, crash))
+    rows = inbox_rows()
+    assert rows[-1][0] == "error" and "boom" in rows[-1][1]
+    assert len(stored_pages(event_id)) == 2

@@ -109,6 +109,27 @@ def _entry(db: Session, **fields) -> InboxEntry:
     return entry
 
 
+def _finish(db: Session, entry: InboxEntry, status: str, detail: str, event_id: int | None = None, pages: int = 0) -> str:
+    entry.status, entry.detail, entry.event_id, entry.pages = status, detail, event_id, pages
+    db.commit()
+    return status
+
+
+DOWNLOAD_ATTEMPTS = (0, 2.0, 5.0)      # seconds to wait before each try: Evolution may not have stored a just-received message yet
+
+
+async def _download(fetch_media, instance: str, item: dict):
+    last: WhatsAppError | None = None
+    for wait in DOWNLOAD_ATTEMPTS:
+        if wait:
+            await asyncio.sleep(wait)
+        try:
+            return await fetch_media(instance, item)
+        except WhatsAppError as exc:
+            last = exc
+    raise last or WhatsAppError("download failed")
+
+
 async def handle_message(db: Session, instance: str, item: dict, fetch_media=None) -> str:
     """Process one received message. Returns the status written to the inbox ('' = nothing to do)."""
     fetch_media = fetch_media or evolution_media_base64
@@ -140,28 +161,26 @@ async def handle_message(db: Session, instance: str, item: dict, fetch_media=Non
     if not is_pdf:
         _entry(db, status="rejected", detail="Not a PDF file.", **common)
         return "rejected"
+    entry = _entry(db, status="processing", detail="Downloading the file…", **common)   # listed at once, so nothing is ever lost silently
     try:
-        content, _mime, _name = await fetch_media(instance, item)
+        content, _mime, _name = await _download(fetch_media, instance, item)
     except WhatsAppError as exc:
-        _entry(db, status="error", detail=f"Could not download the file from WhatsApp: {exc}", **common)
-        return "error"
+        return _finish(db, entry, "error", f"Could not download the file from WhatsApp: {exc}")
     if not content.lstrip().startswith(b"%PDF"):
-        _entry(db, status="rejected", detail="The file is not a valid PDF.", **common)
-        return "rejected"
+        return _finish(db, entry, "rejected", "The file is not a valid PDF.")
+    entry.detail = "Reading the pages…"
+    db.commit()
     event, how = await asyncio.to_thread(choose_event, db, source, content, doc["caption"], doc["file_name"])
     if event is None:
-        _entry(db, status="rejected", detail="No match to put the tickets in - create the match, or choose one for this number.", **common)
-        return "rejected"
+        return _finish(db, entry, "rejected", "No match to put the tickets in - create the match, or choose one for this number.")
     digest = f"tkh.{event.id}.{hashlib.sha256(content).hexdigest()[:24]}"
     if db.get(AppSetting, digest) and (db.query(Ticket).filter(Ticket.event_id == event.id).first()
                                        or db.query(SpareTicket).filter(SpareTicket.event_id == event.id).first()):
-        _entry(db, status="duplicate", event_id=event.id, detail="This exact file was already stored for this match.", **common)
-        return "duplicate"
+        return _finish(db, entry, "duplicate", "This exact file was already stored for this match.", event.id)
     try:
         result = await asyncio.to_thread(add_ticket_pdf, db, event.id, content)
     except PdfProcessingError as exc:
-        _entry(db, status="rejected", event_id=event.id, detail=str(exc), **common)
-        return "rejected"
+        return _finish(db, entry, "rejected", str(exc), event.id)
     db.merge(AppSetting(key=digest, value=utcnow().isoformat()))
     db.commit()
     parts = [f"Stored {result['pages']} page(s) for “{event.name}” ({how})"]
@@ -169,22 +188,53 @@ async def handle_message(db: Session, instance: str, item: dict, fetch_media=Non
         parts.append(f"{len(result['duplicates'])} duplicate page(s) skipped")
     if result["assigned"]:
         parts.append(f"{result['assigned']} given to guests")
-    status = "accepted" if result["pages"] else "duplicate"
-    _entry(db, status=status, event_id=event.id, pages=result["pages"], detail="; ".join(parts) + ".", **common)
-    return status
+    return _finish(db, entry, "accepted" if result["pages"] else "duplicate", "; ".join(parts) + ".", event.id, result["pages"])
+
+
+_QUEUE_LOCK = None      # created lazily inside the running loop
+_QUEUE_LOOP = None
+
+
+def _lock() -> asyncio.Lock:
+    global _QUEUE_LOCK, _QUEUE_LOOP
+    loop = asyncio.get_running_loop()
+    if _QUEUE_LOCK is None or _QUEUE_LOOP is not loop:
+        _QUEUE_LOCK, _QUEUE_LOOP = asyncio.Lock(), loop
+    return _QUEUE_LOCK
 
 
 async def process_webhook(body: dict, fetch_media=None) -> list[str]:
-    """Background job for one messages.upsert webhook (never raises)."""
+    """Background job for one messages.upsert webhook (never raises). Files that arrive together (15-20 PDFs in a row) are
+    handled one after the other, in the order they came in."""
     out = []
     instance = str(body.get("instance") or body.get("instanceName") or "")
     items = body.get("data")
-    for item in items if isinstance(items, list) else [items]:
-        if not isinstance(item, dict):
-            continue
-        try:
-            with SessionLocal() as db:
-                out.append(await handle_message(db, instance, item, fetch_media))
-        except Exception:
-            log.exception("Could not process a received WhatsApp message")
+    async with _lock():
+        for item in items if isinstance(items, list) else [items]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                with SessionLocal() as db:
+                    out.append(await handle_message(db, instance, item, fetch_media))
+            except Exception as exc:
+                log.exception("Could not process a received WhatsApp message")
+                _record_failure(instance, item, exc)
     return out
+
+
+def _record_failure(instance: str, item: dict, exc: Exception) -> None:
+    """Whatever went wrong, the file shows up in the inbox as an error instead of disappearing."""
+    try:
+        key = item.get("key") or {}
+        doc = extract_document(item) or {}
+        with SessionLocal() as db:
+            entry = db.query(InboxEntry).filter(InboxEntry.message_id == str(key.get("id", ""))).first()
+            if entry is not None:
+                entry.status, entry.detail = "error", f"Unexpected error: {exc}"[:500]
+            elif key.get("id"):
+                numbers = sender_numbers(item)
+                db.add(InboxEntry(instance=instance, sender=sorted(numbers, key=len)[0] if numbers else "", message_id=str(key["id"]),
+                                  file_name=str(doc.get("file_name", ""))[:255], status="error", detail=f"Unexpected error: {exc}"[:500]))
+            db.commit()
+    except Exception:
+        log.exception("Could not record the failed message")
