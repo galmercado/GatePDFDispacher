@@ -680,6 +680,39 @@ def rebalance_tickets(db: Session, event_id: int) -> dict:
             return _rebalance_tickets(db, event_id)
 
 
+def repair_spare_pool(db: Session, event_id: int) -> int:
+    """Clean up a pool damaged by uploads that once ran at the same time: an unassigned page that repeats the QR code of a page
+    already in the event is removed, and one that merely reuses a page number of an assigned ticket gets a new number.
+    Without this, handing out such a page fails on every run ("UNIQUE constraint failed: tickets.event_id, tickets.page_number").
+    Returns the number of pages fixed."""
+    tickets = db.query(Ticket).filter(Ticket.event_id == event_id).all()
+    spares = db.query(SpareTicket).filter(SpareTicket.event_id == event_id).order_by(SpareTicket.page_number).all()
+    taken_pages = {t.page_number for t in tickets}
+    seen_codes = {t.qr_code for t in tickets if t.qr_code}
+    used_paths = {t.file_path for t in tickets if t.file_path}
+    top = max([0, *taken_pages, *(sp.page_number for sp in spares)])
+    fixed = 0
+    for sp in spares:
+        if sp.qr_code and sp.qr_code in seen_codes:                       # the same ticket twice: keep the one already in use
+            db.delete(sp)
+            if sp.file_path and sp.file_path not in used_paths:
+                Path(sp.file_path).unlink(missing_ok=True)
+            fixed += 1
+            log.warning("Removed spare page %s of event %s: its QR code is already in the event", sp.page_number, event_id)
+            continue
+        if sp.qr_code:
+            seen_codes.add(sp.qr_code)
+        if sp.page_number in taken_pages:
+            top += 1
+            log.warning("Spare page %s of event %s clashed with an assigned ticket - renumbered to %s", sp.page_number, event_id, top)
+            sp.page_number = top
+            fixed += 1
+        taken_pages.add(sp.page_number)
+    if fixed:
+        db.commit()
+    return fixed
+
+
 def _rebalance_tickets(db: Session, event_id: int) -> dict:
     """Keep every guest's tickets in line with their ticket_count using the event's spare pages.
 
@@ -689,6 +722,8 @@ def _rebalance_tickets(db: Session, event_id: int) -> dict:
     Returns {'assigned': n, 'missing': n, 'spare': n}.
     """
     db.expire_all()  # collections loaded earlier in the request may be stale
+    repair_spare_pool(db, event_id)
+    db.expire_all()
     attendees = (db.query(Attendee).options(selectinload(Attendee.tickets))
                  .filter(Attendee.event_id == event_id).order_by(Attendee.id).all())
     for a in attendees:

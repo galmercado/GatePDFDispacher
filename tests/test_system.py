@@ -3280,3 +3280,32 @@ def test_guest_imports_and_ticket_uploads_running_together_never_hand_out_a_page
     with SessionLocal() as db:
         pages = [t.page_number for t in db.query(Ticket).filter(Ticket.event_id == event_id)]
     assert len(pages) == len(set(pages)) == 20
+
+
+def test_a_pool_damaged_by_old_concurrent_uploads_repairs_itself(admin, event_id):
+    """Spare page 1 next to an assigned ticket page 1 (same QR, or just the same number) made every hand-out fail."""
+    from app.models import SpareTicket
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps([
+        {"name": "Fix A", "phone": "0501110001", "adult": 1, "youth": 0},
+        {"name": "Fix B", "phone": "0501110002", "adult": 1, "youth": 0},
+        {"name": "Fix C", "phone": "0501110003", "adult": 1, "youth": 0}]).encode())})
+    folder = services.event_ticket_dir(event_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in ("a.pdf", "a_dup.pdf", "b.pdf", "c.pdf"):
+        (folder / name).write_bytes(make_pdf(1))
+    with SessionLocal() as db:
+        a = db.query(Attendee).filter_by(event_id=event_id, name="Fix A").one()
+        b = db.query(Attendee).filter_by(event_id=event_id, name="Fix B").one()
+        db.add_all([
+            Ticket(event_id=event_id, attendee_id=a.id, page_number=1, file_path=str(folder / "a.pdf"), qr_code="CODE-X"),
+            Ticket(event_id=event_id, attendee_id=b.id, page_number=2, file_path=str(folder / "b.pdf"), qr_code="CODE-W"),
+            SpareTicket(event_id=event_id, page_number=1, file_path=str(folder / "a_dup.pdf"), qr_code="CODE-X"),   # the same ticket twice
+            SpareTicket(event_id=event_id, page_number=2, file_path=str(folder / "c.pdf"), qr_code="CODE-Y"),       # only the number clashes
+        ])
+        db.commit()
+        result = services.rebalance_tickets(db, event_id)
+        tickets = sorted((t.page_number, t.qr_code) for t in db.query(Ticket).filter(Ticket.event_id == event_id))
+        spares = db.query(SpareTicket).filter(SpareTicket.event_id == event_id).count()
+    assert result["missing"] == 0 and spares == 0 and len(tickets) == 3 and len({p for p, _ in tickets}) == 3
+    assert sorted(c for _, c in tickets) == ["CODE-W", "CODE-X", "CODE-Y"]                     # the second CODE-X is gone
+    assert not (folder / "a_dup.pdf").exists() and (folder / "a.pdf").exists()
