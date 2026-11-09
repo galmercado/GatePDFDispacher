@@ -551,7 +551,7 @@ def manage_ctx(db: Session, user: User, event: Event, **extra) -> dict:
     return {"user": user, "event": event, "stats": compute_stats(db, event.id),
             "issues": load_issues(db, event.id), "has_cookie": bool(registration_cookie(db)), "members_count": db.query(Member).count(),
             "registration_host": config.REGISTRATION_BASE_URL.removeprefix("https://"),
-            "registration_url": (config.REGISTRATION_BASE_URL + config.REGISTRATION_PATH.format(game_id=event.external_id)) if event.external_id else "", "max_pdf_mb": config.MAX_PDF_BYTES // (1024 * 1024),
+            "registration_url": (config.REGISTRATION_BASE_URL + config.REGISTRATION_PATH.format(game_id=event.external_id)) if event.external_id else "", "max_pdf_mb": config.MAX_PDF_BYTES // (1024 * 1024), "categories": data.CATEGORIES,
             "max_list_mb": config.MAX_LIST_BYTES // (1024 * 1024), "ticket_files": tickets, "spare_pages": status["spare"], "warnings": warnings, "attendees": attendees, "groups": group_by_category(attendees),
             "categories": data.CATEGORIES, "messages": [], "errors": [], **extra}
 
@@ -794,6 +794,12 @@ def skip_all_import_issues(event_id: int, request: Request, user: User = Depends
     return render(request, "manage.html", manage_ctx(db, user, event, messages=[f"Skipped {n} row(s)."]))
 
 
+def assigned_breakdown(result: dict) -> str:
+    """' (חבר ארגון 8, מצטרף 4)' - who got the pages, in priority order."""
+    parts = [f"{c} {result['by_category'][c]}" for c in data.CATEGORIES if result.get("by_category", {}).get(c)]
+    return f" ({', '.join(parts)})" if parts else ""
+
+
 def upload_notes(result: dict) -> list[str]:
     """Plain sentences about duplicate pages and unreadable codes found while adding ticket pages."""
     out = []
@@ -808,6 +814,7 @@ def upload_notes(result: dict) -> list[str]:
 @app.post("/events/{event_id}/tickets/upload", response_class=HTMLResponse)
 async def upload_ticket_pdf(
     event_id: int, request: Request, file: UploadFile = File(...), replace: str = Form(""), job: str = Form(""),
+    priority: str = Form(""),
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     event = get_event_or_404(db, event_id)
@@ -816,12 +823,12 @@ async def upload_ticket_pdf(
     try:
         if len(content) > config.MAX_PDF_BYTES:
             raise PdfProcessingError(f"File is too large ({config.MAX_PDF_BYTES // (1024 * 1024)} MB max)")
-        result = await asyncio.to_thread(add_ticket_pdf, db, event.id, content, replace == "on", report)
+        result = await asyncio.to_thread(add_ticket_pdf, db, event.id, content, replace == "on", report, priority)
     except PdfProcessingError as exc:
         return render(request, "manage.html",
                       manage_ctx(db, user, event, errors=[str(exc)]), status=422)
     report.done()
-    msgs = [f"Added {result['pages']} page(s); assigned {result['assigned']} ticket(s) to guests."]
+    msgs = [f"Added {result['pages']} page(s); assigned {result['assigned']} ticket(s) to guests{assigned_breakdown(result)}."]
     if result["spare"]:
         msgs.append(f"{result['spare']} spare page(s) are waiting for new guests.")
     return render(request, "manage.html", manage_ctx(db, user, event, messages=msgs, warnings=upload_notes(result)))
@@ -835,7 +842,7 @@ def job_progress(token: str, user: User = Depends(require_staff)):
 
 @app.post("/events/{event_id}/tickets/drive", response_class=HTMLResponse)
 async def upload_tickets_from_drive(
-    event_id: int, request: Request, links: str = Form(""), replace: str = Form(""), job: str = Form(""),
+    event_id: int, request: Request, links: str = Form(""), replace: str = Form(""), job: str = Form(""), priority: str = Form(""),
     user: User = Depends(require_admin), db: Session = Depends(get_db),
 ):
     """Fetch ticket PDFs from Google Drive share links (one per line; the files must be shared with 'anyone with the link')."""
@@ -851,11 +858,11 @@ async def upload_tickets_from_drive(
             content = await fetch_drive_pdf(
                 url, progress=lambda done, total, s=share: s(0.3 * (done / total if total else 0), "Downloading from Google Drive"))
             result = await asyncio.to_thread(add_ticket_pdf, db, event.id, content, replace == "on" and index == 0,
-                                             share.part(0.3, 1.0))
+                                             share.part(0.3, 1.0), priority)
         except (DriveError, PdfProcessingError) as exc:
             errors.append(f"{url[:70]}: {exc}")
             continue
-        msgs.append(f"Drive file {index + 1}: added {result['pages']} page(s); assigned {result['assigned']} ticket(s) to guests."
+        msgs.append(f"Drive file {index + 1}: added {result['pages']} page(s); assigned {result['assigned']} ticket(s) to guests{assigned_breakdown(result)}."
                     + (f" {result['spare']} spare." if result["spare"] else ""))
         msgs.extend(upload_notes(result))
     report.done()

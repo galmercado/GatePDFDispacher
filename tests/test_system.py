@@ -3309,3 +3309,39 @@ def test_a_pool_damaged_by_old_concurrent_uploads_repairs_itself(admin, event_id
     assert result["missing"] == 0 and spares == 0 and len(tickets) == 3 and len({p for p, _ in tickets}) == 3
     assert sorted(c for _, c in tickets) == ["CODE-W", "CODE-X", "CODE-Y"]                     # the second CODE-X is gone
     assert not (folder / "a_dup.pdf").exists() and (folder / "a.pdf").exists()
+
+
+# --------------------------------------------------------------------------- hand-out priority by category
+
+def category_guests(admin, event_id):
+    rows = [{"name": "G-open", "phone": "0501110001", "category": "פתוח", "adult": 1, "youth": 0},
+            {"name": "G-plus", "phone": "0501110002", "category": "פלוס", "adult": 1, "youth": 0},
+            {"name": "G-join", "phone": "0501110003", "category": "מצטרף", "adult": 1, "youth": 0},
+            {"name": "G-member", "phone": "0501110004", "category": "חבר ארגון", "adult": 1, "youth": 0}]
+    admin.post(f"/events/{event_id}/attendees/import", files={"file": ("g.json", json.dumps(rows).encode())})
+
+
+def who_has_tickets(event_id):
+    with SessionLocal() as db:
+        return {a.name for a in db.query(Attendee).filter(Attendee.event_id == event_id) if a.tickets}
+
+
+def test_pages_go_to_categories_by_priority_by_default(admin, event_id):
+    category_guests(admin, event_id)
+    r = admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("a.pdf", make_pdf(2))})
+    assert "assigned 2 ticket(s) to guests (חבר ארגון 1, מצטרף 1)" in r.text
+    assert who_has_tickets(event_id) == {"G-member", "G-join"}                 # members first, then joiners; open and plus wait
+    admin.post(f"/events/{event_id}/tickets/upload", files={"file": ("b.pdf", make_pdf(1))})
+    assert who_has_tickets(event_id) == {"G-member", "G-join", "G-plus"}       # the next page goes to פלוס, still in order
+
+
+def test_choosing_a_category_first_in_the_upload_form(admin, event_id):
+    category_guests(admin, event_id)
+    page = admin.get(f"/events/{event_id}/manage").text
+    assert page.count('name="priority"') == 2 and "פתוח first" in page and "חבר ארגון → מצטרף → פלוס → פתוח" in page
+    r = admin.post(f"/events/{event_id}/tickets/upload", data={"priority": "פתוח"}, files={"file": ("a.pdf", make_pdf(2))})
+    assert "(חבר ארגון 1, פתוח 1)" in r.text
+    assert who_has_tickets(event_id) == {"G-open", "G-member"}                 # פתוח first, then the default order: חבר ארגון next
+    from app import services as svc
+    assert svc.priority_order("פלוס") == ["פלוס", "חבר ארגון", "מצטרף", "פתוח"]
+    assert svc.priority_order("nonsense") == ["חבר ארגון", "מצטרף", "פלוס", "פתוח"] and svc.priority_order() == svc.priority_order("")

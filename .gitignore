@@ -5,3 +5,4 @@ storage/
 data/
 .pytest_cache/
 .env
+*.whl

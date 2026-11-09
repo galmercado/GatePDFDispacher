@@ -139,12 +139,17 @@
 <section class="rounded-2xl border border-slate-800 bg-slate-900 p-5">
   <h2 class="mb-1 flex items-center gap-2 font-semibold text-white"><i class="ph ph-file-pdf text-brand-400"></i> 2. Upload ticket PDF</h2>
   <p class="mb-3 text-sm text-slate-400">One page per ticket ({{ stats.total }} needed for the current list). Pages are assigned automatically to guests
-    who don't have a ticket yet. You can upload more PDFs later - for late guests or top-ups - and they are added to the pool.
+    who don't have a ticket yet - by category priority (default: חבר ארגון, מצטרף, פלוס, פתוח; pick another category to serve it first). You can upload more PDFs later - for late guests or top-ups - and they are added to the pool.
     {% if spare_pages %}<span class="text-slate-300">{{ spare_pages }} spare page(s) waiting.</span>{% endif %}</p>
   <form method="post" action="/events/{{ event.id }}/tickets/upload" enctype="multipart/form-data" data-progress="Adding the ticket pages" data-max-mb="{{ max_pdf_mb }}" class="flex flex-col gap-3">
     <div class="flex flex-col gap-3 sm:flex-row">
       <input type="file" name="file" accept="application/pdf,.pdf" required
              class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-3 file:text-slate-200">
+      <select name="priority" aria-label="Who gets the tickets first" title="Who gets the tickets first"
+              class="rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm text-slate-200 sm:max-w-[15rem]">
+        <option value="">Priority: {{ categories|join(' → ') }}</option>
+        {% for c in categories %}<option value="{{ c }}">{{ c }} first</option>{% endfor %}
+      </select>
       <button class="flex items-center justify-center gap-2 rounded-xl bg-brand-500 px-5 py-3 text-sm font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-scissors"></i> Add &amp; assign</button>
     </div>
     <label class="flex items-center gap-2 text-sm text-slate-400"><input type="checkbox" name="replace" class="h-4 w-4 rounded"
@@ -157,6 +162,11 @@
     <div class="flex flex-col gap-3 sm:flex-row">
       <textarea id="drive-links" name="links" rows="2" required placeholder="https://drive.google.com/file/d/…/view" dir="ltr"
                 class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-200 placeholder-slate-600"></textarea>
+      <select name="priority" aria-label="Who gets the tickets first" title="Who gets the tickets first"
+              class="rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm text-slate-200 sm:max-w-[15rem] self-start">
+        <option value="">Priority: {{ categories|join(' → ') }}</option>
+        {% for c in categories %}<option value="{{ c }}">{{ c }} first</option>{% endfor %}
+      </select>
       <button class="flex items-center justify-center gap-2 self-start rounded-xl bg-brand-500 px-5 py-3 text-sm font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-cloud-arrow-down"></i> Fetch &amp; assign</button>
     </div>
     <label class="flex items-center gap-2 text-sm text-slate-400"><input type="checkbox" name="replace" class="h-4 w-4 rounded"

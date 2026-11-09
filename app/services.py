@@ -669,15 +669,24 @@ def ticket_status(db: Session, event_id: int) -> dict:
 _REBALANCE_LOCK = threading.RLock()      # handing spare pages to guests: two runs at once would give the same page to two guests
 
 
-def rebalance_tickets(db: Session, event_id: int) -> dict:
-    """Keep every guest's tickets in line with their ticket_count (see _rebalance_tickets). Runs one at a time - a guest
-    import, an edit and a ticket upload can all trigger it together - and is retried once if the database still objects."""
+def priority_order(first: str | None = None) -> list[str]:
+    """The order in which guest categories receive spare ticket pages: the default priority (חבר ארגון, מצטרף, פלוס, פתוח),
+    or - when `first` names a category - that one first and the others after it in the default order."""
+    base = list(data.CATEGORIES)
+    first = data.CATEGORY_ALIASES.get((first or "").strip(), (first or "").strip())
+    return [first] + [c for c in base if c != first] if first in base else base
+
+
+def rebalance_tickets(db: Session, event_id: int, first: str | None = None) -> dict:
+    """Keep every guest's tickets in line with their ticket_count (see _rebalance_tickets). Spare pages go to guests by category
+    priority (see priority_order), then in registration order. Runs one at a time - a guest import, an edit and a ticket
+    upload can all trigger it together - and is retried once if the database still objects."""
     with _REBALANCE_LOCK:
         try:
-            return _rebalance_tickets(db, event_id)
+            return _rebalance_tickets(db, event_id, first)
         except IntegrityError:
             db.rollback()
-            return _rebalance_tickets(db, event_id)
+            return _rebalance_tickets(db, event_id, first)
 
 
 def repair_spare_pool(db: Session, event_id: int) -> int:
@@ -713,7 +722,7 @@ def repair_spare_pool(db: Session, event_id: int) -> int:
     return fixed
 
 
-def _rebalance_tickets(db: Session, event_id: int) -> dict:
+def _rebalance_tickets(db: Session, event_id: int, first: str | None = None) -> dict:
     """Keep every guest's tickets in line with their ticket_count using the event's spare pages.
 
     1. Guests holding more tickets than they should (count lowered / guest removed elsewhere)
@@ -726,6 +735,8 @@ def _rebalance_tickets(db: Session, event_id: int) -> dict:
     db.expire_all()
     attendees = (db.query(Attendee).options(selectinload(Attendee.tickets))
                  .filter(Attendee.event_id == event_id).order_by(Attendee.id).all())
+    rank = {c: i for i, c in enumerate(priority_order(first))}
+    attendees.sort(key=lambda a: (rank.get(a.category, len(rank)), a.id))        # stable: registration order within a category
     for a in attendees:
         surplus = len(a.tickets) - a.ticket_count
         if surplus > 0:
@@ -740,6 +751,7 @@ def _rebalance_tickets(db: Session, event_id: int) -> dict:
               .order_by(SpareTicket.page_number).all())
     queue = iter(spares)
     assigned = missing = 0
+    by_category: dict[str, int] = {}
     for a in attendees:
         need = a.ticket_count - min(len(a.tickets), a.ticket_count)
         for _ in range(need):
@@ -751,10 +763,11 @@ def _rebalance_tickets(db: Session, event_id: int) -> dict:
                           file_path=spare.file_path, qr_code=spare.qr_code, file_hash=spare.file_hash))
             db.delete(spare)
             assigned += 1
+            by_category[a.category] = by_category.get(a.category, 0) + 1
     db.commit()
     db.expire_all()
     left = db.query(SpareTicket).filter(SpareTicket.event_id == event_id).count()
-    return {"assigned": assigned, "missing": missing, "spare": left}
+    return {"assigned": assigned, "missing": missing, "spare": left, "by_category": by_category}
 
 
 def release_tickets(db: Session, attendee: Attendee) -> None:
@@ -770,15 +783,15 @@ def release_tickets(db: Session, attendee: Attendee) -> None:
 _UPLOAD_LOCK = threading.Lock()      # one ticket upload at a time: page numbers and the duplicate check must not race
 
 
-def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = False, progress=None) -> dict:
+def add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = False, progress=None, first: str | None = None) -> dict:
     """Add the pages of a PDF to the event's ticket pool (uploads, Drive, API and WhatsApp can all arrive at once; they
     are processed one after the other). See _add_ticket_pdf."""
     with _UPLOAD_LOCK:
         db.expire_all()
-        return _add_ticket_pdf(db, event_id, content, replace, progress)
+        return _add_ticket_pdf(db, event_id, content, replace, progress, first)
 
 
-def _add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = False, progress=None) -> dict:
+def _add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = False, progress=None, first: str | None = None) -> dict:
     """Add the pages of a (merged) PDF to the event's ticket pool and hand them out.
 
     Additive by default: later uploads top up guests who are still missing tickets.
@@ -822,7 +835,7 @@ def _add_ticket_pdf(db: Session, event_id: int, content: bytes, replace: bool = 
     db.commit()
     report_progress(progress, 0.92, "Giving the pages to the guests")
     return {"pages": len(result.pages), "duplicates": result.duplicates, "unreadable": result.unreadable,
-            "notes": result.notes, **rebalance_tickets(db, event_id)}
+            "notes": result.notes, **rebalance_tickets(db, event_id, first)}
 
 
 # --------------------------------------------------------------------------- WhatsApp

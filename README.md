@@ -143,6 +143,11 @@ curl -X POST https://gatetickets.duckdns.org/api/tickets \
 * Pages are added to the pool and handed to guests like any upload. Sending the same file again changes nothing
   (`"duplicate": true`). The answer is JSON: `event_id`, `event`, `date`, `location`, `created_event`, `pages`, `assigned`, `spare`, `missing`.
 
+**Who gets the pages first.** Uploaded pages go to guests by category priority: **חבר ארגון → מצטרף → פלוס → פתוח**, and in registration order within a
+category (the default). Beside the *Add & assign* / *Fetch & assign* buttons a drop-down lets you serve another category first (e.g. *פתוח first*; the
+others then follow in the default order) - no extra click or popup. After an upload the message shows who received pages, e.g. "(חבר ארגון 8, מצטרף 4)".
+Pages that arrive later (guest edits, Drive, WhatsApp inbox, API) use the default priority.
+
 **Duplicate codes.** Every uploaded page is rendered and its QR code / barcode is read (pypdfium2 + zxing-cpp). A page whose code is already in the
 event - or repeats an earlier page of the same PDF - is **not stored** and is reported ("Skipped N duplicate page(s)"), so two tickets can never
 share a code. Each stored page also keeps its code and the SHA-256 of its file. A compressed page must still read the same code, otherwise it is
