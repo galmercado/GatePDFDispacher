@@ -3345,3 +3345,206 @@ def test_choosing_a_category_first_in_the_upload_form(admin, event_id):
     from app import services as svc
     assert svc.priority_order("פלוס") == ["פלוס", "חבר ארגון", "מצטרף", "פתוח"]
     assert svc.priority_order("nonsense") == ["חבר ארגון", "מצטרף", "פלוס", "פתוח"] and svc.priority_order() == svc.priority_order("")
+
+
+# --------------------------------------------------------------------------- test console (/lab)
+
+class LabSender:
+    """Fake WhatsApp for the console: records what was sent to whom; numbers in `fail` raise an error."""
+
+    def __init__(self, fail=()):
+        self.sent, self.fail, self.n = [], set(fail), 0
+
+    async def __call__(self, phone, path, caption, file_name="t.pdf", client=None, instance=None):
+        if phone in self.fail:
+            raise services.WhatsAppError("Evolution said no")
+        self.n += 1
+        self.sent.append({"phone": phone, "caption": caption, "path": path, "file": file_name})
+        return services.SentRef(f"{phone}@s.whatsapp.net", f"LAB{self.n}")
+
+
+def run_batch_now(batch_id, sender, on_sent=None):
+    import asyncio
+    from app import lab
+    asyncio.run(lab.run_batch(batch_id, sender, on_sent))
+
+
+def lab_items(batch_id):
+    from app.models import DispatchItem
+    with SessionLocal() as db:
+        return [(i.position, i.phone, i.status, i.detail, i.qr_code) for i in db.query(DispatchItem).filter_by(batch_id=batch_id).order_by(DispatchItem.position)]
+
+
+def test_lab_pages_are_admin_only_and_show_the_system_check(admin, doorman, client, monkeypatch):
+    async def instances(client=None):
+        return [{"name": "event-door-1", "number": "", "state": "open"}]
+
+    monkeypatch.setattr("app.main.evolution_list_instances", instances)
+    for url in ("/lab", "/lab/dispatch", "/lab/split"):
+        assert doorman.get(url).status_code == 403
+    page = admin.get("/lab").text
+    assert "System check" in page and "WhatsApp lines" in page and "Evolution API" in page and "1 instance(s) answered" in page
+    assert "Ticket dispatch" in page and "Split &amp; dispatch" in page and "Send a test message" in page
+    assert 'href="/lab"' in admin.get("/events").text
+
+
+def test_split_a_pdf_into_tickets_and_dispatch_each_one(admin, event_id, monkeypatch):
+    pytest.importorskip("zxingcpp")
+    from app import lab
+    started = []
+    monkeypatch.setattr(lab, "start", lambda batch_id, sender, on_sent=None: started.append(batch_id))
+    r = admin.post("/lab/split", data={"title": "Test tickets", "numbers": "052-1110001\n052-1110002\nnot a number\n052-1110003", "compress": "on"},
+                   files={"file": ("tickets.pdf", coded_pdf(["LAB-1", "LAB-2", "LAB-3", "LAB-4"]), "application/pdf")})
+    assert r.status_code == 303 and r.headers["location"].startswith("/lab/batch/")
+    batch_id = int(r.headers["location"].rsplit("/", 1)[1])
+    items = lab_items(batch_id)
+    assert [i[4] for i in items] == ["LAB-1", "LAB-2", "LAB-3", "LAB-4"]                       # four single tickets, QR codes read
+    assert [i[1] for i in items] == ["972521110001", "972521110002", "972521110003", ""]       # numbers in page order; page 4 has none yet
+    page = admin.get(f"/lab/batch/{batch_id}").text
+    assert "Test tickets" in page and "Single tickets cut from your PDF" in page and page.count('name="phone_') == 4 and "QR: LAB-3" in page
+    from app.models import DispatchItem
+    with SessionLocal() as db:
+        first = db.query(DispatchItem).filter_by(batch_id=batch_id, position=1).one().id
+    assert admin.get(f"/lab/item/{first}/preview.png").content[:4] == b"\x89PNG"
+    assert admin.get(f"/lab/item/{first}/ticket.pdf").content[:4] == b"%PDF"
+    assert admin.get(f"/lab/batch/{batch_id}/tickets.zip").content[:2] == b"PK"
+    # type the missing number next to page 4 and press "Save & dispatch"
+    with SessionLocal() as db:
+        fourth = db.query(DispatchItem).filter_by(batch_id=batch_id, position=4).one().id
+    r = admin.post(f"/lab/batch/{batch_id}/recipients", data={f"phone_{fourth}": "0521110004", "then": "send"})
+    assert r.status_code == 303 and started == [batch_id]
+    sender = LabSender()
+    run_batch_now(batch_id, sender)
+    assert [x["phone"] for x in sender.sent] == ["972521110001", "972521110002", "972521110003", "972521110004"]
+    assert all(i[2] == "sent" for i in lab_items(batch_id)) and all(Path(x["path"]).is_file() for x in sender.sent)
+    rows = admin.get(f"/lab/batch/{batch_id}/rows").text
+    assert "4</b> of 4 sent" in rows and "hx-trigger" not in rows                                 # finished: the page stops refreshing itself
+
+
+def test_lab_batch_failures_can_be_retried_and_sent_messages_unsent(admin, event_id, monkeypatch):
+    from app import lab
+    monkeypatch.setattr(lab, "start", lambda *a, **k: None)
+    r = admin.post("/lab/split", data={"numbers": "0521119991\n0521119992", "title": "Retry"},
+                   files={"file": ("t.pdf", make_pdf(3), "application/pdf")})
+    batch_id = int(r.headers["location"].rsplit("/", 1)[1])
+    sender = LabSender(fail={"972521119992"})
+    run_batch_now(batch_id, sender)
+    assert [i[2] for i in lab_items(batch_id)] == ["sent", "failed", "skipped"]                    # page 3 has no number
+    assert "Evolution said no" in lab_items(batch_id)[1][3]
+    page = admin.get(f"/lab/batch/{batch_id}").text
+    assert "1 failed" in page and "1 without a number" in page and "Retry failed" in page
+    sender.fail.clear()
+    admin.post(f"/lab/batch/{batch_id}/recipients", data={"same_number": "0521119993"})          # one number for every unsent page
+    run_batch_now(batch_id, sender)
+    assert [i[2] for i in lab_items(batch_id)] == ["sent", "sent", "sent"] and sender.sent[-1]["phone"] == "972521119993"
+    deleted = []
+
+    async def deleter(jid, message_id, client=None, instance=None):
+        deleted.append(message_id)
+
+    monkeypatch.setattr("app.main.delete_whatsapp_message", deleter)
+    assert "Deleted 3 message(s)" in admin.post(f"/lab/batch/{batch_id}/unsend").text and len(deleted) == 3
+    folder = lab.lab_dir(batch_id)
+    assert folder.exists()
+    admin.post(f"/lab/batch/{batch_id}/delete")
+    assert not folder.exists() and admin.get(f"/lab/batch/{batch_id}").status_code == 404
+
+
+def test_dispatch_tickets_of_guests_as_a_test_to_my_number_or_for_real(admin, doorman, event_id, monkeypatch):
+    from app import lab, main as main_module
+    from app.models import SentMessage
+    monkeypatch.setattr(lab, "start", lambda *a, **k: None)
+    att = party(admin, event_id)                                       # "Party Order": 3 tickets
+    assert "Party Order" in admin.get(f"/lab/dispatch?event={event_id}").text
+    assert admin.post("/lab/dispatch", data={"event_id": event_id}).status_code == 422                          # nobody ticked
+    # test mode: everything goes to my number and nothing is marked as sent
+    r = admin.post("/lab/dispatch", data={"event_id": event_id, "guest": [att], "redirect_phone": "0529990000"})
+    test_batch = int(r.headers["location"].rsplit("/", 1)[1])
+    sender = LabSender()
+    run_batch_now(test_batch, sender, main_module.lab_on_sent)
+    assert [x["phone"] for x in sender.sent] == ["972529990000"] * 3 and all(x["caption"].startswith("[TEST for Party Order]") for x in sender.sent)
+    assert admitted(att)[3] == [False, False, False]                   # a test: tickets still unsent
+    # for real: the guest's own number, tickets are marked as sent and the messages are remembered for deletion
+    r = admin.post("/lab/dispatch", data={"event_id": event_id, "guest": [att]})
+    real_batch = int(r.headers["location"].rsplit("/", 1)[1])
+    sender = LabSender()
+    run_batch_now(real_batch, sender, main_module.lab_on_sent)
+    assert {x["phone"] for x in sender.sent} == {"972501234500"} and admitted(att)[3] == [True, True, True]
+    with SessionLocal() as db:
+        assert db.query(SentMessage).filter_by(attendee_id=att, message_id="LAB1").count() == 1
+    # everything was sent: another dispatch has nothing to do unless "send again" is ticked
+    assert admin.post("/lab/dispatch", data={"event_id": event_id, "guest": [att]}).status_code == 422
+    assert admin.post("/lab/dispatch", data={"event_id": event_id, "guest": [att], "resend": "on"}).status_code == 303
+
+
+def test_lab_simulates_the_inbox_and_helpers(admin, event_id, source):
+    from app import lab
+    assert lab.parse_numbers("052-1234567, 0541112222\nabc\n12") == ["972521234567", "972541112222"]
+    pytest.importorskip("zxingcpp")
+    sid = None
+    from app.models import TicketSource
+    with SessionLocal() as db:
+        sid = db.query(TicketSource).first().id
+    r = admin.post("/lab/simulate-inbox", data={"source_id": sid}, files={"file": ("sim.pdf", coded_pdf(["SIM-1", "SIM-2"]), "application/pdf")})
+    assert r.status_code == 200 and "Inbox result for sim.pdf: accepted" in r.text
+    assert [x[1] for x in stored_pages(event_id)] == ["SIM-1", "SIM-2"]
+
+
+def test_old_lab_batches_are_cleaned_up(admin, monkeypatch):
+    from app import lab
+    from app.models import DispatchBatch
+    monkeypatch.setattr(lab, "start", lambda *a, **k: None)
+    r = admin.post("/lab/split", data={"title": "Old"}, files={"file": ("t.pdf", make_pdf(1), "application/pdf")})
+    batch_id = int(r.headers["location"].rsplit("/", 1)[1])
+    with SessionLocal() as db:
+        db.get(DispatchBatch, batch_id).created_at = datetime.utcnow() - timedelta(days=5)
+        db.commit()
+    assert lab.cleanup_old() >= 1 and not lab.lab_dir(batch_id).exists()
+
+
+def test_split_page_takes_pdfs_straight_from_google_drive(admin, event_id, monkeypatch):
+    from app import lab, main as main_module
+    monkeypatch.setattr(lab, "start", lambda *a, **k: None)
+    fetched = []
+
+    async def fake_fetch(link, client=None, progress=None):
+        fetched.append(link)
+        if "bad" in link:
+            raise main_module.DriveError("not shared")
+        if progress:
+            progress(5, 10)
+        return make_pdf(2 if "big" in link else 1)
+
+    monkeypatch.setattr(main_module, "fetch_drive_pdf", fake_fetch)
+    page = admin.get("/lab/split").text
+    assert 'name="drive_links"' in page and "nothing goes through your computer" in page and "data-optional-file" in page
+    # two Drive files and one uploaded file become ONE batch; the pages follow each other
+    r = admin.post("/lab/split", data={"drive_links": "https://drive.google.com/file/d/bigbigbig1/view\nhttps://drive.google.com/file/d/smallsmall2/view",
+                                        "title": "From Drive", "numbers": "0521110001"},
+                   files={"file": ("local.pdf", make_pdf(1), "application/pdf")})
+    assert r.status_code == 303 and len(fetched) == 2
+    batch_id = int(r.headers["location"].rsplit("/", 1)[1])
+    items = lab_items(batch_id)
+    assert len(items) == 4 and items[0][1] == "972521110001" and items[1][1] == ""             # 1 local + 2 + 1 pages, in that order
+    # only a link, no file: fine; a bad link is explained; nothing at all is refused
+    ok = admin.post("/lab/split", data={"drive_links": "https://drive.google.com/file/d/onlyalink12/view"}, files=[])
+    assert ok.status_code == 303
+    bad = admin.post("/lab/split", data={"drive_links": "https://drive.google.com/file/d/badbadbad12/view"}, files=[])
+    assert bad.status_code == 422 and "Google Drive link 1: not shared" in bad.text
+    none = admin.post("/lab/split", data={"title": "x"}, files=[])
+    assert none.status_code == 422 and "Choose a PDF file or paste a Google Drive link" in none.text
+
+
+def test_inbox_simulation_can_fetch_the_pdf_from_google_drive(admin, event_id, source, monkeypatch):
+    from app import main as main_module
+    from app.models import TicketSource
+
+    async def fake_fetch(link, client=None, progress=None):
+        return make_pdf(2)
+
+    monkeypatch.setattr(main_module, "fetch_drive_pdf", fake_fetch)
+    with SessionLocal() as db:
+        sid = db.query(TicketSource).first().id
+    r = admin.post("/lab/simulate-inbox", data={"source_id": sid, "drive_links": "https://drive.google.com/file/d/simsimsim12/view"}, files=[])
+    assert r.status_code == 200 and "Inbox result for tickets-1.pdf: accepted" in r.text
+    assert len(stored_pages(event_id)) == 2

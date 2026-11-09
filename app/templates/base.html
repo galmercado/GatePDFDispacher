@@ -42,6 +42,7 @@
         <span class="hidden text-slate-400 sm:inline">{{ user.full_name }}
           <span class="ml-1 rounded-full bg-slate-800 px-2 py-0.5 text-xs uppercase tracking-wide text-slate-300">{{ user.role.value }}</span></span>
         {% if user.role.value == 'admin' %}<a href="/lines" class="text-slate-300 hover:text-white" aria-label="WhatsApp lines" title="WhatsApp lines"><i class="ph ph-sim-card text-lg"></i></a>
+        <a href="/lab" class="text-slate-300 hover:text-white" aria-label="Test console" title="Test console (dispatch, split, checks)"><i class="ph ph-flask text-lg"></i></a>
         <a href="/inbox" class="text-slate-300 hover:text-white" aria-label="Ticket inbox" title="Ticket inbox (tickets received on WhatsApp)"><i class="ph ph-tray-arrow-down text-lg"></i></a>
         <a href="/settings" class="text-slate-300 hover:text-white" aria-label="Site settings" title="Site settings"><i class="ph ph-sliders-horizontal text-lg"></i></a>
         <a href="/members" class="text-slate-300 hover:text-white" aria-label="Members phone book" title="Members phone book"><i class="ph ph-address-book text-lg"></i></a>
@@ -150,8 +151,8 @@
       const form = e.target.closest ? e.target.closest('form[data-progress]') : null;
       if (!form || e.defaultPrevented || form.hasAttribute('hx-post') || !window.XMLHttpRequest || !window.FormData) return;
       const fileInput = form.querySelector('input[type=file]');
-      if (fileInput && !fileInput.files.length) return;                      // nothing to upload: normal submit / browser validation
-      const file = fileInput ? fileInput.files[0] : null, token = Progress.newToken();
+      if (fileInput && !fileInput.files.length && !form.hasAttribute('data-optional-file')) return;      // nothing to upload: normal submit / browser validation
+      const file = fileInput && fileInput.files.length ? fileInput.files[0] : null, token = Progress.newToken();
       const mb = (n) => (n / 1048576).toFixed(n > 10485760 ? 0 : 1) + ' MB';
       if (file && form.dataset.maxMb && file.size > Number(form.dataset.maxMb) * 1048576) {
         e.preventDefault(); showToast('File is too large (' + mb(file.size) + '); the limit is ' + form.dataset.maxMb + ' MB.', 'error'); return;
@@ -164,7 +165,14 @@
         xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) Progress.upload(ev.loaded * 100 / ev.total, 'Uploading… ' + mb(ev.loaded) + ' of ' + mb(ev.total)); };
         xhr.upload.onload = () => { Progress.upload(100, 'Upload complete - processing…'); };
       }
-      xhr.onload = () => { Progress.end(); setTimeout(() => { document.open(); document.write(xhr.responseText); document.close(); }, 320); };
+      xhr.onload = () => {
+        Progress.end();
+        const redirected = xhr.responseURL && new URL(xhr.responseURL).pathname !== new URL(form.action).pathname;
+        setTimeout(() => {          // a redirect (e.g. to the new batch) is followed as a real page load; other results are shown in place
+          if (redirected) { location.assign(xhr.responseURL); return; }
+          document.open(); document.write(xhr.responseText); document.close();
+        }, 320);
+      };
       xhr.onerror = () => { Progress.end(true); showToast('The action failed - check your connection and try again.', 'error'); };
       xhr.onabort = () => { Progress.end(true); showToast('Cancelled.', 'error'); };
       const body = new FormData(form); body.append('job', token);

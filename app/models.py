@@ -292,3 +292,41 @@ class InboxEntry(Base):
     detail: Mapped[str] = mapped_column(Text, default="")
     event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pages: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class DispatchBatch(Base):
+    """A test-console run: tickets sent to chosen numbers on WhatsApp (guests of a match, or the pages of a split PDF)."""
+
+    __tablename__ = "dispatch_batches"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))                      # guests | split
+    title: Mapped[str] = mapped_column(String(160), default="")
+    event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    redirect_phone: Mapped[str] = mapped_column(String(32), default="")  # test mode: everything goes to this number
+    state: Mapped[str] = mapped_column(String(12), default="draft", index=True)   # draft | running | done
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class DispatchItem(Base):
+    """One ticket page and who it goes to."""
+
+    __tablename__ = "dispatch_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("dispatch_batches.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    name: Mapped[str] = mapped_column(String(255), default="")
+    phone: Mapped[str] = mapped_column(String(32), default="")
+    file_path: Mapped[str] = mapped_column(String(512), default="")
+    qr_code: Mapped[str] = mapped_column(String(600), default="")
+    ticket_id: Mapped[int | None] = mapped_column(Integer, nullable=True)         # the guest's ticket (guest batches)
+    attendee_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    index_of: Mapped[str] = mapped_column(String(16), default="1/1")             # "2/3": ticket 2 of the guest's 3
+    status: Mapped[str] = mapped_column(String(12), default="queued", index=True)   # queued | sending | sent | failed | skipped
+    detail: Mapped[str] = mapped_column(Text, default="")
+    line_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    remote_jid: Mapped[str] = mapped_column(String(64), default="")
+    message_id: Mapped[str] = mapped_column(String(128), default="")
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    unsent: Mapped[bool] = mapped_column(Boolean, default=False)

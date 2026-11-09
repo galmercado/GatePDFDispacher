@@ -163,6 +163,19 @@ A re-encoded image is used only if it is really smaller. Tests decode the QR cod
 **Retention.** Ticket PDFs are deleted `TICKET_RETENTION_DAYS` (default 30) after the event ends, checked every 10 minutes
 (Settings → Cleanup; 0 keeps them). Guests and attendance stay; the tickets lose their file, so old download links stop working.
 
+### Test console (flask icon, admins only)
+
+`/lab` is a place to try everything without the door: a **system check** (lines, Evolution, QR reader, webhooks seen, upload API, inbox numbers, public address),
+a test-message sender and a *Try the ticket inbox* form (a PDF is handled as if one of your inbox numbers had sent it on WhatsApp).
+* **Ticket dispatch** (`/lab/dispatch`): pick a match, tick guests, and send their ticket PDFs on WhatsApp (one message per ticket, same wording, pauses and
+  fail-over as the door). With a number in *Test mode* everything goes to that number only - nothing reaches the guests and nothing is marked as sent.
+  A real dispatch marks the tickets as sent and the messages are deleted after the event like any other.
+* **Split & dispatch a PDF** (`/lab/split`): upload one PDF with many tickets - or paste **Google Drive links** (shared as *Anyone with the link*): the server downloads
+  them straight from Drive, so large files never pass through your computer; several links/files become one batch. It is divided into single-ticket PDFs (QR codes read, compressed; nothing is
+  added to a match), then you give each ticket a number (one for all, a pasted list in page order, or typed next to each page) and press *Save & dispatch*.
+* Every dispatch has a live page: a thumbnail, QR text and status per ticket (waiting / sending / sent / failed), *Retry failed*, a ZIP of all tickets and
+  *Delete sent messages from WhatsApp* for cleaning up after a test. Split batches are removed after 3 days.
+
 ### Ticket inbox: tickets received on WhatsApp
 
 On the **Ticket inbox** page (tray icon in the top bar, admins only) you list the WhatsApp numbers that send you tickets. When one of them sends a **PDF** to

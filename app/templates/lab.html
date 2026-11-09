@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Test console{% endblock %}
+{% block content %}
+{% set field = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white outline-none focus:border-brand-400" %}
+{% set label = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" %}
+<a href="/events" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-400 hover:text-white"><i class="ph ph-arrow-left"></i> Events</a>
+<h1 class="text-2xl font-bold text-white"><i class="ph ph-flask text-brand-400"></i> Test console</h1>
+<p class="mb-4 mt-1 text-sm text-slate-400">Try every part of the system without touching the door: check what works, send tickets on WhatsApp, or split one PDF into single tickets and send them.</p>
+
+{% for m in messages %}<div class="mb-3 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200" role="status"><i class="ph-fill ph-check-circle"></i> {{ m }}</div>{% endfor %}
+{% for e in errors %}<div class="mb-3 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert"><i class="ph-fill ph-warning-circle mt-0.5"></i><span>{{ e }}</span></div>{% endfor %}
+
+<div class="mb-5 grid gap-3 sm:grid-cols-2">
+  <a href="/lab/dispatch" class="rounded-2xl border border-slate-800 bg-slate-900 p-4 hover:border-brand-400">
+    <p class="flex items-center gap-2 text-lg font-semibold text-white"><i class="ph ph-paper-plane-tilt text-brand-400"></i> Ticket dispatch</p>
+    <p class="mt-1 text-sm text-slate-400">Pick a match and guests, send their tickets on WhatsApp - to them, or to your own number as a test - and watch each one go out.</p></a>
+  <a href="/lab/split" class="rounded-2xl border border-slate-800 bg-slate-900 p-4 hover:border-brand-400">
+    <p class="flex items-center gap-2 text-lg font-semibold text-white"><i class="ph ph-scissors text-brand-400"></i> Split &amp; dispatch a PDF</p>
+    <p class="mt-1 text-sm text-slate-400">Upload one PDF with many tickets, divide it into single tickets, give each a number and dispatch them.</p></a>
+</div>
+
+<section class="mb-5 rounded-2xl border border-slate-800 bg-slate-900 p-4">
+  <h2 class="mb-3 font-semibold text-white">System check</h2>
+  <ul class="space-y-1.5 text-sm">
+    {% for c in checks %}
+    <li class="flex items-start gap-2"><i class="ph-fill mt-0.5 {{ {'ok': 'ph-check-circle text-emerald-400', 'warn': 'ph-warning text-amber-400', 'bad': 'ph-x-circle text-rose-400'}[c.state] }}"></i>
+      <span class="min-w-0"><b class="text-slate-100">{{ c.name }}</b> <span class="text-slate-400">- {{ c.detail }}</span>{% if c.link %} <a href="{{ c.link }}" class="text-brand-400 underline">open</a>{% endif %}</span></li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="mb-5 grid gap-4 sm:grid-cols-2">
+  <form method="post" action="/lab/test-message" class="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+    <h2 class="mb-3 font-semibold text-white">Send a test message</h2>
+    <label class="{{ label }}" for="tm-phone">WhatsApp number</label>
+    <input id="tm-phone" name="phone" inputmode="tel" required placeholder="052-1234567" class="{{ field }} mb-3">
+    <label class="{{ label }}" for="tm-text">Text</label>
+    <input id="tm-text" name="text" placeholder="Test message from the ticketing system." class="{{ field }} mb-3">
+    <button class="w-full rounded-xl bg-brand-500 py-2.5 font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-paper-plane-right"></i> Send through the first working line</button>
+  </form>
+  <form method="post" action="/lab/simulate-inbox" enctype="multipart/form-data" data-progress="Handling the PDF" data-optional-file data-max-mb="{{ 200 }}" class="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+    <h2 class="mb-1 font-semibold text-white">Try the ticket inbox</h2>
+    <p class="mb-3 text-xs text-slate-400">Handled exactly as if the chosen number had sent the PDF on WhatsApp.</p>
+    <label class="{{ label }}" for="si-src">Sent by</label>
+    <select id="si-src" name="source_id" required class="{{ field }} mb-3">
+      {% for s in sources %}<option value="{{ s.id }}">{{ s.label }} · +{{ s.phone }}</option>{% else %}<option value="">No number yet - add one on the Ticket inbox page</option>{% endfor %}
+    </select>
+    <label class="{{ label }}" for="si-cap">Caption (optional)</label>
+    <input id="si-cap" name="caption" placeholder='קיבלת כרטיסים למכבי ת"א - הפועל אילת' class="{{ field }} mb-3">
+    <input type="file" name="file" accept="application/pdf,.pdf" class="mb-2 w-full rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-2.5 file:text-slate-200">
+    <textarea name="drive_links" rows="2" dir="ltr" placeholder="…or a Google Drive link (the server downloads it)" class="{{ field }} mb-3"></textarea>
+    <button class="w-full rounded-xl bg-slate-800 py-2.5 font-semibold text-white hover:bg-slate-700"><i class="ph-bold ph-tray-arrow-down"></i> Handle this PDF</button>
+  </form>
+</section>
+
+<section class="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+  <h2 class="mb-3 font-semibold text-white">Recent dispatches</h2>
+  <ul class="space-y-2">
+    {% for b in batches %}
+    <li><a href="/lab/batch/{{ b.batch.id }}" class="flex items-center justify-between gap-3 rounded-xl border border-slate-800 px-3 py-2 text-sm hover:border-brand-400">
+      <span class="min-w-0 truncate"><i class="ph {{ 'ph-scissors' if b.batch.kind == 'split' else 'ph-paper-plane-tilt' }} text-brand-400"></i> {{ b.batch.title }}
+        <span class="text-xs text-slate-500">· {{ b.batch.created_at.strftime('%d/%m %H:%M') }} UTC</span></span>
+      <span class="shrink-0 text-xs text-slate-300">{{ b.counts.sent }}/{{ b.counts.total }} sent{% if b.counts.failed %} · <span class="text-rose-300">{{ b.counts.failed }} failed</span>{% endif %}</span></a></li>
+    {% else %}
+    <li class="rounded-xl border border-dashed border-slate-700 p-5 text-center text-sm text-slate-400">Nothing sent from here yet.</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}

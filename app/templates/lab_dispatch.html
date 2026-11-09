@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Ticket dispatch{% endblock %}
+{% block content %}
+{% set field = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white outline-none focus:border-brand-400" %}
+{% set label = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" %}
+<a href="/lab" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-400 hover:text-white"><i class="ph ph-arrow-left"></i> Test console</a>
+<h1 class="text-2xl font-bold text-white"><i class="ph ph-paper-plane-tilt text-brand-400"></i> Ticket dispatch</h1>
+<p class="mb-4 mt-1 text-sm text-slate-400">Send the ticket PDFs of chosen guests on WhatsApp, one message per ticket, through your working lines (same wording, pauses and fail-over as the door).</p>
+
+<form method="get" action="/lab/dispatch" class="mb-4 flex gap-2">
+  <select name="event" class="{{ field }}" aria-label="Match" onchange="this.form.submit()">
+    <option value="">Choose a match…</option>
+    {% for e in events %}<option value="{{ e.id }}" {{ 'selected' if event and event.id == e.id }}>{{ e.name }} · {{ e.event_date.strftime('%d/%m/%Y') }}</option>{% endfor %}
+  </select>
+  <button class="shrink-0 rounded-xl bg-slate-800 px-4 text-sm font-semibold text-white hover:bg-slate-700">Show guests</button>
+</form>
+
+{% if event %}
+<form method="post" action="/lab/dispatch" id="dispatch-form"
+      onsubmit="const n=this.querySelectorAll('input[name=guest]:checked').length; if(!n){alert('Tick at least one guest.');return false;} if(!this.redirect_phone.value.trim()) return confirm('This sends the real tickets to '+n+' guest(s) on WhatsApp. Continue?');">
+  <input type="hidden" name="event_id" value="{{ event.id }}">
+  <section class="mb-4 rounded-2xl border border-slate-800 bg-slate-900 p-4">
+    <div class="grid gap-3 sm:grid-cols-[1.5fr_1fr_auto] sm:items-end">
+      <div><label class="{{ label }}" for="redir">Test mode: send everything to this number instead</label>
+        <input id="redir" name="redirect_phone" inputmode="tel" placeholder="Your own number - leave empty to send to the guests" class="{{ field }}">
+        <p class="mt-1 text-xs text-slate-500">With a number here nobody else receives anything and the tickets are <b>not</b> marked as sent.</p></div>
+      <label class="flex items-center gap-2 pb-2 text-sm text-slate-300"><input type="checkbox" name="resend" class="h-4 w-4 rounded"> Also send tickets that were already sent</label>
+      <button class="rounded-xl bg-green-500 px-5 py-3 font-bold text-green-950 hover:bg-green-400"><i class="ph-fill ph-whatsapp-logo"></i> Send selected</button>
+    </div>
+  </section>
+
+  <div class="mb-2 flex flex-wrap items-center gap-2 text-sm">
+    <input id="gfilter" type="search" placeholder="Filter by name or number" class="min-w-0 flex-1 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white">
+    <button type="button" class="rounded-lg border border-slate-700 px-3 py-2 text-slate-200 hover:bg-slate-800" onclick="labTick(true)">All</button>
+    <button type="button" class="rounded-lg border border-slate-700 px-3 py-2 text-slate-200 hover:bg-slate-800" onclick="labTick(false)">None</button>
+    <button type="button" class="rounded-lg border border-slate-700 px-3 py-2 text-slate-200 hover:bg-slate-800" onclick="labTick(true,true)">Not sent yet</button>
+  </div>
+  <div class="overflow-hidden rounded-2xl border border-slate-800">
+    <table class="w-full text-left text-sm">
+      <thead class="bg-slate-900 text-xs uppercase tracking-wide text-slate-400"><tr><th class="w-10 px-3 py-2"></th><th class="px-3 py-2">Guest</th><th class="hidden px-3 py-2 sm:table-cell">Category</th><th class="px-3 py-2">Tickets</th></tr></thead>
+      <tbody id="gbody" class="divide-y divide-slate-800">
+        {% for g in guests %}
+        {% set have = g.tickets|length %}{% set sent = g.tickets|selectattr('delivered_at')|list|length %}
+        <tr data-text="{{ (g.name ~ ' ' ~ g.phone)|lower }}" data-pending="{{ 1 if have > sent else 0 }}">
+          <td class="px-3 py-2"><input type="checkbox" name="guest" value="{{ g.id }}" {{ 'disabled' if not have }} class="h-4 w-4 rounded" aria-label="Select {{ g.name }}"></td>
+          <td class="px-3 py-2"><p class="font-medium text-white">{{ g.name }}</p><p class="text-xs text-slate-500">+{{ g.phone }}</p></td>
+          <td class="hidden px-3 py-2 text-slate-300 sm:table-cell" dir="rtl">{{ g.category }}</td>
+          <td class="px-3 py-2">{% if have %}<span class="text-slate-200">{{ have }}</span> <span class="text-xs {{ 'text-emerald-300' if sent == have else 'text-slate-500' }}">· {{ sent }} sent</span>{% else %}<span class="text-xs text-rose-300">no PDF</span>{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="px-3 py-6 text-center text-slate-400">This match has no guests yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</form>
+<script>
+  function labTick(on, pendingOnly) {
+    document.querySelectorAll('#gbody tr').forEach((tr) => {
+      const box = tr.querySelector('input[name=guest]'); if (!box || box.disabled || tr.hidden) return;
+      box.checked = on && (!pendingOnly || tr.dataset.pending === '1');
+    });
+  }
+  document.getElementById('gfilter').addEventListener('input', (e) => {
+    const q = e.target.value.trim().toLowerCase();
+    document.querySelectorAll('#gbody tr[data-text]').forEach((tr) => { tr.hidden = q && !tr.dataset.text.includes(q); });
+  });
+</script>
+{% endif %}
+{% endblock %}

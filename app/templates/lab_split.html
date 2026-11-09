@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Split &amp; dispatch{% endblock %}
+{% block content %}
+{% set field = "w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-base text-white outline-none focus:border-brand-400" %}
+{% set label = "mb-1 block text-xs font-medium uppercase tracking-wide text-slate-400" %}
+<a href="/lab" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-400 hover:text-white"><i class="ph ph-arrow-left"></i> Test console</a>
+<h1 class="text-2xl font-bold text-white"><i class="ph ph-scissors text-brand-400"></i> Split &amp; dispatch a PDF</h1>
+<p class="mb-4 mt-1 text-sm text-slate-400">Upload one PDF that holds many tickets. It is divided into single-ticket PDFs (QR codes read, pages compressed); on the next screen you
+  see every ticket, give each a WhatsApp number and dispatch them. Nothing is added to a match - it is a test batch, removed automatically after {{ 3 }} days.</p>
+{% for e in errors %}<div class="mb-3 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200" role="alert"><i class="ph-fill ph-warning-circle mt-0.5"></i><span>{{ e }}</span></div>{% endfor %}
+
+<form method="post" action="/lab/split" enctype="multipart/form-data" data-progress="Splitting the PDF" data-optional-file data-max-mb="{{ max_pdf_mb }}" class="space-y-4 rounded-2xl border border-slate-800 bg-slate-900 p-4">
+  <div><label class="{{ label }}" for="sp-file">PDF file from this computer</label>
+    <input id="sp-file" type="file" name="file" accept="application/pdf,.pdf" class="w-full rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-3 file:border-0 file:bg-slate-800 file:px-4 file:py-3 file:text-slate-200"></div>
+  <div><label class="{{ label }}" for="sp-drive"><i class="ph ph-google-drive-logo"></i> …or from Google Drive - paste the link(s), one per line</label>
+    <textarea id="sp-drive" name="drive_links" rows="2" dir="ltr" placeholder="https://drive.google.com/file/d/…/view" class="{{ field }}"></textarea>
+    <p class="mt-1 text-xs text-slate-500">The <b>server</b> downloads the file straight from Google Drive - nothing goes through your computer, so large files are fine.
+      The file must be shared as “Anyone with the link”. Several links (and/or a file) become one batch, their pages one after the other.</p></div>
+  <div><label class="{{ label }}" for="sp-title">Name of the batch (optional)</label>
+    <input id="sp-title" name="title" maxlength="160" placeholder="e.g. Maccabi - Eilat tickets" class="{{ field }}"></div>
+  <div><label class="{{ label }}" for="sp-numbers">WhatsApp numbers (optional - you can also fill them in on the next screen)</label>
+    <textarea id="sp-numbers" name="numbers" rows="4" placeholder="One number per line: page 1 goes to the first, page 2 to the second …" dir="ltr" class="{{ field }}"></textarea>
+    <label class="mt-2 flex items-center gap-2 text-sm text-slate-300"><input type="checkbox" name="same_for_all" class="h-4 w-4 rounded"> Send every page to the first number (test it on yourself)</label></div>
+  <label class="flex items-center gap-2 text-sm text-slate-300"><input type="checkbox" name="compress" checked class="h-4 w-4 rounded"> Compress the pages (QR codes stay readable)</label>
+  <button class="w-full rounded-xl bg-brand-500 py-3 font-semibold text-white hover:bg-brand-600"><i class="ph-bold ph-scissors"></i> Split into tickets</button>
+</form>
+{% endblock %}

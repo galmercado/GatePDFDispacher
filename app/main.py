@@ -33,9 +33,10 @@ from .auth import (
 from . import lines as linesmod
 from .google_auth import GoogleAuthError, fetch_profile
 from .database import SessionLocal, get_db, init_db
-from .models import AppSetting, Attendee, InboxEntry, TicketSource, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Member, TicketBundle, Ticket, User, utcnow
+from .models import AppSetting, Attendee, DispatchBatch, DispatchItem, InboxEntry, TicketSource, Event, ImportIssue, OrphanMessage, Role, SentMessage, SpareTicket, WhatsAppLine, Member, TicketBundle, Ticket, User, utcnow
 from .messages import ticket_caption
 from . import inbox as inboxmod
+from . import lab as labmod
 from .inbox import match_or_create_event
 from .progress import Reporter, status as job_status
 from .pdfs import DriveError, fetch_drive_pdf, parse_ticket_header, read_ticket_meta
@@ -204,6 +205,7 @@ async def cleanup_loop() -> None:
     while True:
         try:
             purge_old_tickets()
+            labmod.cleanup_old()
         except Exception:
             log.exception("Ticket file cleanup failed")
         try:
@@ -223,6 +225,7 @@ async def lifespan(_app: FastAPI):
     with SessionLocal() as db:
         site_settings.load_and_apply(db)
         linesmod.ensure_default_line(db)
+    labmod.recover_interrupted()
     tasks = [asyncio.create_task(cleanup_loop()), asyncio.create_task(linesmod.pretest_loop())]
     try:
         yield
@@ -1622,6 +1625,8 @@ async def evolution_webhook(request: Request, token: str = "", db: Session = Dep
     except ValueError:
         return JSONResponse({"ok": False}, status_code=400)
     event_name = str(body.get("event", "")).lower().replace("_", ".")
+    if event_name in ("messages.upsert", "messages.update"):            # shown on the test console: is Evolution reporting to us?
+        linesmod.set_setting(db, f"lab.hook.{event_name.split('.')[1]}", utcnow().isoformat(timespec="seconds"))
     if event_name == "messages.upsert":              # a received message: may be a ticket PDF from a configured number
         background_tasks.add(asyncio.ensure_future(inboxmod.process_webhook(body)))
         return {"ok": True, "queued": True}
@@ -1712,6 +1717,290 @@ def clear_inbox_log(request: Request, user: User = Depends(require_admin), db: S
     db.query(InboxEntry).delete()
     db.commit()
     return render(request, "inbox.html", inbox_ctx(db, user, messages=["The list was cleared."]))
+
+
+# --------------------------------------------------------------------------- test console (/lab)
+
+def lab_on_sent(db: Session, item: DispatchItem, ref, line) -> None:
+    """A real dispatch (not a redirected test): the guest's ticket counts as sent and the message can be deleted later."""
+    batch = db.get(DispatchBatch, item.batch_id)
+    if batch is None or batch.kind != "guests" or batch.redirect_phone or not item.ticket_id:
+        return
+    ticket, attendee = db.get(Ticket, item.ticket_id), db.get(Attendee, item.attendee_id)
+    if ticket is None or attendee is None:
+        return
+    event = db.get(Event, attendee.event_id)
+    ticket.delivered_at, ticket.send_failed = utcnow(), False
+    if ref is not None:
+        db.add(SentMessage(event_id=event.id, attendee_id=attendee.id, ticket_id=ticket.id, line_id=line.id, remote_jid=ref.remote_jid,
+                           message_id=ref.message_id, delete_at=schedule_delete_at(event)))
+    db.commit()
+
+
+def lab_batches(db: Session, limit: int = 12) -> list[dict]:
+    rows = db.query(DispatchBatch).order_by(DispatchBatch.id.desc()).limit(limit).all()
+    return [{"batch": b, "counts": labmod.batch_counts(db, b.id)} for b in rows]
+
+
+async def lab_checks(db: Session) -> list[dict]:
+    """What works and what does not - one line each: ok | warn | bad."""
+    out = []
+    info = linesmod.line_summary(db)
+    out.append({"name": "WhatsApp lines", "state": "ok" if not info["low"] else "warn",
+                "detail": f"{info['working']} of {info['total']} working (needs {config.MIN_WORKING_LINES})", "link": "/lines"})
+    instances = await evolution_list_instances()
+    out.append({"name": "Evolution API", "state": "ok" if instances else "bad",
+                "detail": f"{len(instances)} instance(s) answered" if instances else "no answer - check the evolution-api container and EVOLUTION_API_KEY"})
+    from .pdfs import read_codes
+    out.append({"name": "QR code reader", "state": "ok" if read_codes(b"") is not None else "bad",
+                "detail": "installed" if read_codes(b"") is not None else "pypdfium2 / zxing-cpp are not installed"})
+    for key, label in (("update", "Delivery reports (messages.update)"), ("upsert", "Received messages (messages.upsert)")):
+        when = linesmod.get_setting(db, f"lab.hook.{key}", "")
+        out.append({"name": label, "state": "ok" if when else "warn", "detail": f"last seen {when.replace('T', ' ')} UTC" if when
+                    else "not seen yet - send or receive a WhatsApp message; check the webhook settings in docker-compose.yml"})
+    out.append({"name": "Upload API", "state": "ok" if config.TICKETS_API_KEY else "warn",
+                "detail": "TICKETS_API_KEY is set" if config.TICKETS_API_KEY else "TICKETS_API_KEY is empty - the API is off"})
+    sources = db.query(TicketSource).filter(TicketSource.active.is_(True)).count()
+    out.append({"name": "Ticket inbox", "state": "ok" if sources else "warn", "link": "/inbox",
+                "detail": f"{sources} number(s) can send tickets by WhatsApp" if sources else "no number configured"})
+    out.append({"name": "Public address", "state": "ok" if config.PUBLIC_BASE_URL and not is_loopback(config.PUBLIC_BASE_URL) else "warn",
+                "detail": config.PUBLIC_BASE_URL or "PUBLIC_BASE_URL is empty - QR links use the address of your browser"})
+    return out
+
+
+def lab_ctx(db: Session, user: User, **extra) -> dict:
+    sources = db.query(TicketSource).order_by(TicketSource.id).all()
+    return {"user": user, "batches": lab_batches(db), "sources": sources, "messages": [], "errors": [], "checks": [], **extra}
+
+
+@app.get("/lab", response_class=HTMLResponse)
+async def lab_home(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return render(request, "lab.html", lab_ctx(db, user, checks=await lab_checks(db)))
+
+
+@app.post("/lab/test-message", response_class=HTMLResponse)
+async def lab_test_message(request: Request, phone: str = Form(""), text: str = Form(""),
+                           user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    numbers = labmod.parse_numbers(phone)
+    text = text.strip() or "Test message from the ticketing system."
+    if not numbers:
+        return render(request, "lab.html", lab_ctx(db, user, checks=await lab_checks(db), errors=["Enter a WhatsApp number."]), status=422)
+    try:
+        line = await linesmod.deliver_text(db, numbers[0], text, send_whatsapp_text)
+    except WhatsAppError as exc:
+        return render(request, "lab.html", lab_ctx(db, user, checks=await lab_checks(db), errors=[f"Not sent: {exc}"]), status=422)
+    return render(request, "lab.html", lab_ctx(db, user, checks=await lab_checks(db), messages=[f"Sent to +{numbers[0]} through {line.label}."]))
+
+
+@app.post("/lab/simulate-inbox", response_class=HTMLResponse)
+async def lab_simulate_inbox(request: Request, file: UploadFile = File(None), drive_links: str = Form(""), source_id: int = Form(0),
+                             caption: str = Form(""), job: str = Form(""), user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Try the Ticket inbox without WhatsApp: the PDF is handled as if the chosen number had sent it."""
+    source = db.get(TicketSource, source_id)
+    if source is None:
+        return render(request, "lab.html", lab_ctx(db, user, checks=await lab_checks(db), errors=["Choose one of the inbox numbers (add one on the Ticket inbox page)."]), status=422)
+    try:
+        contents = await lab_collect_pdfs(file, drive_links, Reporter(job), share=0.8)
+    except PdfProcessingError as exc:
+        return render(request, "lab.html", lab_ctx(db, user, checks=await lab_checks(db), errors=[str(exc)]), status=422)
+    results = []
+    for number, content in enumerate(contents, start=1):
+        name = (file.filename if file is not None and file.filename and number == 1 else "") or f"tickets-{number}.pdf"
+        item = {"key": {"id": "SIM" + uuid.uuid4().hex[:16], "fromMe": False, "remoteJid": f"{source.phone}@s.whatsapp.net"}, "pushName": "Simulation",
+                "message": {"documentMessage": {"fileName": name, "mimetype": "application/pdf", "caption": caption}}}
+
+        async def fetch(instance, message, content=content, name=name):
+            return content, "application/pdf", name
+
+        status = await inboxmod.handle_message(db, "simulation", item, fetch)
+        entry = db.query(InboxEntry).order_by(InboxEntry.id.desc()).first()
+        results.append(f"Inbox result for {name}: {status or 'ignored'} - {entry.detail if entry else ''}")
+    return render(request, "lab.html", lab_ctx(db, user, checks=await lab_checks(db), messages=results + ["Details are on the Ticket inbox page."]))
+
+
+@app.get("/lab/dispatch", response_class=HTMLResponse)
+def lab_dispatch_page(request: Request, event: int = 0, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    events = db.query(Event).order_by(Event.event_date.desc()).limit(60).all()
+    chosen = db.get(Event, event) if event else None
+    guests = []
+    if chosen is not None:
+        guests = (db.query(Attendee).options(selectinload(Attendee.tickets)).filter(Attendee.event_id == chosen.id)
+                  .order_by(func.lower(Attendee.name), Attendee.id).all())
+    return render(request, "lab_dispatch.html", {"user": user, "events": events, "event": chosen, "guests": guests,
+                                                 "messages": [], "errors": [], "categories": data.CATEGORIES})
+
+
+@app.post("/lab/dispatch", response_class=HTMLResponse)
+async def lab_dispatch_send(request: Request, event_id: int = Form(0), guest: list[int] = Form([]), redirect_phone: str = Form(""),
+                            resend: str = Form(""), user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    event = db.get(Event, event_id)
+    if event is None or not guest:
+        raise HTTPException(422, "Choose a match and at least one guest.")
+    redirect = labmod.parse_numbers(redirect_phone)[:1]
+    if redirect_phone.strip() and not redirect:
+        raise HTTPException(422, "That test number is not valid.")
+    guests = (db.query(Attendee).options(selectinload(Attendee.tickets))
+              .filter(Attendee.event_id == event.id, Attendee.id.in_(guest)).order_by(func.lower(Attendee.name), Attendee.id).all())
+    batch = labmod.guest_batch(db, event, guests, redirect[0] if redirect else "", resend == "on")
+    if not labmod.batch_counts(db, batch.id)["total"]:
+        labmod.delete_batch(db, batch)
+        raise HTTPException(422, "These guests have no ticket PDFs waiting - tick 'send again' to resend sent ones.")
+    labmod.start(batch.id, send_whatsapp_pdf, lab_on_sent)
+    return RedirectResponse(f"/lab/batch/{batch.id}", status_code=303)
+
+
+@app.get("/lab/split", response_class=HTMLResponse)
+def lab_split_page(request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return render(request, "lab_split.html", {"user": user, "messages": [], "errors": [], "max_pdf_mb": config.MAX_PDF_BYTES // (1024 * 1024)})
+
+
+async def lab_collect_pdfs(file: UploadFile | None, drive_links: str, report: Reporter, share: float = 0.4) -> list[bytes]:
+    """The PDFs of a console form: an uploaded file and/or Google Drive links, which the server downloads itself (nothing passes
+    through the browser, so even huge files do not have to be downloaded to your own computer)."""
+    contents: list[bytes] = []
+    if file is not None and file.filename:
+        data_ = await file.read(config.MAX_PDF_BYTES + 1)
+        if len(data_) > config.MAX_PDF_BYTES:
+            raise PdfProcessingError(f"File is too large ({config.MAX_PDF_BYTES // (1024 * 1024)} MB max)")
+        contents.append(data_)
+    links = [u for u in re.split(r"[\s,]+", drive_links) if u][:20]
+    for index, url in enumerate(links):
+        part = report.part(share * index / max(1, len(links)), share * (index + 1) / len(links))
+        try:
+            contents.append(await fetch_drive_pdf(url, progress=lambda done, total, p_=part, n=index + 1: p_(
+                (done / total) if total else 0.0, f"Downloading file {n} of {len(links)} from Google Drive")))
+        except DriveError as exc:
+            raise PdfProcessingError(f"Google Drive link {index + 1}: {exc}")
+    if not contents:
+        raise PdfProcessingError("Choose a PDF file or paste a Google Drive link.")
+    return contents
+
+
+@app.post("/lab/split", response_class=HTMLResponse)
+async def lab_split_upload(request: Request, file: UploadFile = File(None), drive_links: str = Form(""), title: str = Form(""),
+                           numbers: str = Form(""), same_for_all: str = Form(""), compress: str = Form(""), job: str = Form(""),
+                           user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    report = Reporter(job)
+    try:
+        contents = await lab_collect_pdfs(file, drive_links, report)
+        name = title or (file.filename if file is not None and file.filename else "") or "Split tickets"
+        batch = await asyncio.to_thread(labmod.split_to_batch, db, contents, name, labmod.parse_numbers(numbers),
+                                        same_for_all == "on", compress == "on", report.part(0.4, 1.0))
+    except PdfProcessingError as exc:
+        return render(request, "lab_split.html", {"user": user, "messages": [], "errors": [str(exc)], "max_pdf_mb": config.MAX_PDF_BYTES // (1024 * 1024)}, status=422)
+    report.done()
+    return RedirectResponse(f"/lab/batch/{batch.id}", status_code=303)
+
+
+def get_batch_or_404(db: Session, batch_id: int) -> DispatchBatch:
+    batch = db.get(DispatchBatch, batch_id)
+    if batch is None:
+        raise HTTPException(404, "That batch no longer exists")
+    return batch
+
+
+def batch_ctx(db: Session, user: User, batch: DispatchBatch, **extra) -> dict:
+    items = db.query(DispatchItem).filter(DispatchItem.batch_id == batch.id).order_by(DispatchItem.position).all()
+    lines = {l.id: l.label for l in db.query(WhatsAppLine)}
+    return {"user": user, "batch": batch, "items": items, "counts": labmod.batch_counts(db, batch.id), "lines": lines,
+            "event": db.get(Event, batch.event_id) if batch.event_id else None, "messages": [], "errors": [], **extra}
+
+
+@app.get("/lab/batch/{batch_id}", response_class=HTMLResponse)
+def lab_batch_page(batch_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return render(request, "lab_batch.html", batch_ctx(db, user, get_batch_or_404(db, batch_id)))
+
+
+@app.get("/lab/batch/{batch_id}/rows", response_class=HTMLResponse)
+def lab_batch_rows(batch_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return render(request, "partials/lab_rows.html", batch_ctx(db, user, get_batch_or_404(db, batch_id)))
+
+
+@app.post("/lab/batch/{batch_id}/recipients", response_class=HTMLResponse)
+async def lab_batch_recipients(batch_id: int, request: Request, numbers: str = Form(""), same_number: str = Form(""),
+                               then: str = Form(""), user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Set who gets which page: the typed fields, then optionally a pasted list (in order) or one number for all pages."""
+    batch = get_batch_or_404(db, batch_id)
+    form = await request.form()
+    open_items = [i for i in db.query(DispatchItem).filter(DispatchItem.batch_id == batch.id, DispatchItem.status.in_(("queued", "failed", "skipped")))
+                  .order_by(DispatchItem.position)]
+    for item in open_items:
+        if f"phone_{item.id}" in form:
+            digits = labmod.parse_numbers(str(form[f"phone_{item.id}"]))
+            item.phone = digits[0] if digits else ""
+    listed, one = labmod.parse_numbers(numbers), labmod.parse_numbers(same_number)
+    for position, item in enumerate(open_items):
+        if one:
+            item.phone = one[0]
+        elif listed and position < len(listed):
+            item.phone = listed[position]
+        if item.status in ("failed", "skipped") and item.phone:
+            item.status, item.detail = "queued", ""
+    db.commit()
+    if then == "send" and batch.state != "running":                 # "Dispatch" pressed: save what was typed, then send
+        labmod.start(batch.id, send_whatsapp_pdf, lab_on_sent)
+    return RedirectResponse(f"/lab/batch/{batch.id}", status_code=303)
+
+
+@app.post("/lab/batch/{batch_id}/send", response_class=HTMLResponse)
+def lab_batch_send(batch_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    batch = get_batch_or_404(db, batch_id)
+    if batch.state != "running":
+        labmod.start(batch.id, send_whatsapp_pdf, lab_on_sent)
+    return RedirectResponse(f"/lab/batch/{batch.id}", status_code=303)
+
+
+@app.post("/lab/batch/{batch_id}/retry", response_class=HTMLResponse)
+def lab_batch_retry(batch_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    batch = get_batch_or_404(db, batch_id)
+    labmod.retry_failed(db, batch.id)
+    if batch.state != "running":
+        labmod.start(batch.id, send_whatsapp_pdf, lab_on_sent)
+    return RedirectResponse(f"/lab/batch/{batch.id}", status_code=303)
+
+
+@app.post("/lab/batch/{batch_id}/unsend", response_class=HTMLResponse)
+async def lab_batch_unsend(batch_id: int, request: Request, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    batch = get_batch_or_404(db, batch_id)
+    done, failed = await labmod.unsend_batch(batch.id, delete_whatsapp_message)
+    db.expire_all()
+    return render(request, "lab_batch.html", batch_ctx(db, user, batch, messages=[f"Deleted {done} message(s) from WhatsApp."],
+                                                       errors=[f"{failed} message(s) could not be deleted."] if failed else []))
+
+
+@app.post("/lab/batch/{batch_id}/delete", response_class=HTMLResponse)
+def lab_batch_delete(batch_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    labmod.delete_batch(db, get_batch_or_404(db, batch_id))
+    return RedirectResponse("/lab", status_code=303)
+
+
+@app.get("/lab/batch/{batch_id}/tickets.zip")
+def lab_batch_zip(batch_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    batch = get_batch_or_404(db, batch_id)
+    return Response(labmod.batch_zip(db, batch.id), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="batch-{batch.id}.zip"'})
+
+
+def lab_item_path(db: Session, item_id: int) -> Path:
+    item = db.get(DispatchItem, item_id)
+    path = Path(item.file_path).resolve() if item and item.file_path else None
+    if path is None or not path.is_relative_to(config.STORAGE_DIR.resolve()) or not path.is_file():
+        raise HTTPException(404, "File not found")
+    return path
+
+
+@app.get("/lab/item/{item_id}/ticket.pdf")
+def lab_item_pdf(item_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return FileResponse(lab_item_path(db, item_id), media_type="application/pdf", filename=f"ticket-{item_id}.pdf",
+                        content_disposition_type="inline", headers={"Cache-Control": "private, no-store"})
+
+
+@app.get("/lab/item/{item_id}/preview.png")
+def lab_item_preview(item_id: int, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    png = labmod.preview_png(str(lab_item_path(db, item_id)))
+    if png is None:
+        raise HTTPException(404, "No preview available")
+    return Response(png, media_type="image/png", headers={"Cache-Control": "private, max-age=300"})
 
 
 @app.get("/lines", response_class=HTMLResponse)

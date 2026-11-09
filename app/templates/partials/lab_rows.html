@@ -1,0 +1,47 @@
+{# Live part of a dispatch batch: summary, buttons and one row per ticket. Refreshes itself while something is being sent. #}
+{% set busy = batch.state == 'running' or counts.sending or (counts.queued and batch.state == 'running') %}
+<section id="lab-live" class="rounded-2xl border border-slate-800 bg-slate-900 p-4"
+         {% if busy %}hx-get="/lab/batch/{{ batch.id }}/rows" hx-trigger="every 1500ms" hx-swap="outerHTML"{% endif %}>
+  <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+    <div class="text-sm text-slate-300">
+      <b class="text-white">{{ counts.sent }}</b> of {{ counts.total }} sent
+      {% if counts.failed %}· <span class="text-rose-300">{{ counts.failed }} failed</span>{% endif %}
+      {% if counts.skipped %}· <span class="text-amber-300">{{ counts.skipped }} without a number</span>{% endif %}
+      {% if counts.queued %}· {{ counts.queued }} waiting{% endif %}
+      {% if busy %}<span class="ml-1 animate-pulse text-sky-300"><i class="ph ph-circle-notch"></i> sending…</span>{% endif %}
+    </div>
+    <div class="flex flex-wrap gap-2">
+      {% if not busy and counts.queued %}
+        {% if batch.kind == 'split' %}<button form="recipients-form" name="then" value="send" class="rounded-xl bg-green-500 px-4 py-2 text-sm font-bold text-green-950 hover:bg-green-400"><i class="ph-fill ph-whatsapp-logo"></i> Save &amp; dispatch {{ counts.queued }} ticket(s)</button>
+        {% else %}<form method="post" action="/lab/batch/{{ batch.id }}/send"><button class="rounded-xl bg-green-500 px-4 py-2 text-sm font-bold text-green-950 hover:bg-green-400"><i class="ph-fill ph-whatsapp-logo"></i> Dispatch {{ counts.queued }} ticket(s)</button></form>{% endif %}
+      {% endif %}
+      {% if not busy and (counts.failed or counts.skipped) %}<form method="post" action="/lab/batch/{{ batch.id }}/retry"><button class="rounded-xl border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"><i class="ph ph-arrow-clockwise"></i> Retry failed</button></form>{% endif %}
+    </div>
+  </div>
+  <div class="mb-3 h-2 overflow-hidden rounded-full bg-slate-800" role="progressbar" aria-valuemin="0" aria-valuemax="{{ counts.total }}" aria-valuenow="{{ counts.sent }}">
+    <div class="h-full rounded-full bg-emerald-500 transition-all" style="width: {{ (counts.sent * 100 // counts.total) if counts.total else 0 }}%"></div></div>
+  <ul class="divide-y divide-slate-800">
+    {% set tone = {'queued': 'bg-slate-700 text-slate-300', 'sending': 'bg-sky-500/20 text-sky-300 animate-pulse', 'sent': 'bg-emerald-500/20 text-emerald-300', 'failed': 'bg-rose-500/20 text-rose-300', 'skipped': 'bg-amber-500/20 text-amber-300'} %}
+    {% set text = {'queued': 'Waiting', 'sending': 'Sending…', 'sent': 'Sent', 'failed': 'Failed', 'skipped': 'No number'} %}
+    {% for i in items %}
+    <li class="flex gap-3 py-3">
+      <a href="/lab/item/{{ i.id }}/ticket.pdf" target="_blank" rel="noopener" class="shrink-0" title="Open the PDF">
+        <img src="/lab/item/{{ i.id }}/preview.png" alt="" loading="lazy" width="56" height="78" class="h-20 w-14 rounded border border-slate-700 bg-white object-cover" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'flex h-20 w-14 items-center justify-center rounded border border-slate-700 text-slate-500',innerHTML:'<i class=\'ph ph-file-pdf text-2xl\'></i>'}))"></a>
+      <div class="min-w-0 flex-1">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <p class="truncate text-sm font-medium text-white">{{ i.name or 'Ticket' }} <span class="text-xs text-slate-500">· ticket {{ i.index_of }}</span></p>
+          <span class="rounded-full px-2.5 py-0.5 text-xs font-semibold {{ tone[i.status] }}">{{ text[i.status] }}{% if i.unsent %} · deleted{% endif %}</span>
+        </div>
+        {% if i.qr_code %}<p class="truncate text-xs text-slate-500" title="What the QR code says">QR: {{ i.qr_code }}</p>{% endif %}
+        {% if batch.kind == 'split' and i.status != 'sent' and i.status != 'sending' and batch.state != 'running' %}
+        <input form="recipients-form" name="phone_{{ i.id }}" value="{{ i.phone }}" inputmode="tel" placeholder="WhatsApp number" aria-label="Number for ticket {{ i.index_of }}" dir="ltr"
+               class="mt-1 w-full max-w-xs rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-sm text-white">
+        {% else %}<p class="text-xs text-slate-400">{% if i.phone %}→ +{{ i.phone }}{% endif %}{% if i.detail %} · {{ i.detail }}{% endif %}</p>{% endif %}
+        {% if i.status == 'failed' and i.detail %}<p class="mt-0.5 text-xs text-rose-300">{{ i.detail }}</p>{% endif %}
+      </div>
+    </li>
+    {% else %}
+    <li class="py-6 text-center text-sm text-slate-400">No tickets in this batch.</li>
+    {% endfor %}
+  </ul>
+</section>
